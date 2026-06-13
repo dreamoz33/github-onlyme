@@ -15,6 +15,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -143,9 +145,11 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
     val activeAlarm by viewModel.activeRingingAlarm.collectAsStateWithLifecycle()
     val bypassedLogs by viewModel.bypassedLogs.collectAsStateWithLifecycle()
     val govtApiKey by viewModel.govtApiKey.collectAsStateWithLifecycle()
+    val lastSyncDate by viewModel.lastSyncDateStr.collectAsStateWithLifecycle()
 
     var showEditDialog by remember { mutableStateOf<Alarm?>(null) }
     var currentTab by remember { mutableIntStateOf(0) } // 0 = Alarms, 1 = Holiday Sync, 2 = Logs
+    var showSettingsDialog by remember { mutableStateOf(false) }
 
     // Request poster permissions on Android 13+
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -169,10 +173,8 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
                 .statusBarsPadding()
         ) {
             // Bedside Cosmic Header & Clock
-            val currentThemeMode by viewModel.themeMode.collectAsStateWithLifecycle()
             BedsideHeader(
-                themeMode = currentThemeMode,
-                onThemeChange = { viewModel.setThemeMode(it) }
+                onSettingsClick = { showSettingsDialog = true }
             )
 
             // Tabs Selector
@@ -249,6 +251,7 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
                             holidays = holidays,
                             syncState = syncState,
                             govtApiKey = govtApiKey,
+                            lastSyncDate = lastSyncDate,
                             onSaveGovtApiKey = { viewModel.saveGovtApiKey(it) },
                             onSyncHolidays = { year, govtKey -> viewModel.syncHolidays(year, govtKey) },
                             onAddHoliday = { viewModel.addHoliday(it) },
@@ -259,33 +262,58 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
                     }
                 }
             }
-            
-            // Bottom Safe padding for navigation gesture bars
-            Spacer(modifier = Modifier.navigationBarsPadding())
         }
 
         // Floating Action Button anchored to the viewport bottom-end, active only on Tab 0 (Alarms)
         if (currentTab == 0) {
-            FloatingActionButton(
-                onClick = { 
-                    val defaultUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM)?.toString()
-                    showEditDialog = Alarm(
-                        hour = 7, 
-                        minute = 0, 
-                        label = "새 알람", 
-                        customToneUri = defaultUri, 
-                        customToneName = "기본 알람 벨소리"
-                    ) 
-                },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
+            Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(24.dp)
                     .navigationBarsPadding()
-                    .testTag("add_alarm_button")
+                    .padding(bottom = 24.dp, end = 24.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Add, contentDescription = "알람 추가")
+                val interactionSource = remember { MutableInteractionSource() }
+                val isPressed by interactionSource.collectIsPressedAsState()
+                val scale by animateFloatAsState(
+                    targetValue = if (isPressed) 0.88f else 1.0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessLow
+                    ),
+                    label = "add_button_scale"
+                )
+
+                FloatingActionButton(
+                    onClick = { 
+                        val defaultUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM)?.toString()
+                        showEditDialog = Alarm(
+                            hour = 7, 
+                            minute = 0, 
+                            label = "새 알람", 
+                            customToneUri = defaultUri, 
+                            customToneName = "기본 알람 벨소리"
+                        ) 
+                    },
+                    interactionSource = interactionSource,
+                    shape = CircleShape,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp, pressedElevation = 3.dp),
+                    modifier = Modifier
+                        .requiredSize(64.dp)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .testTag("add_alarm_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "알람 추가",
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
             }
         }
 
@@ -318,6 +346,13 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
             )
         }
 
+        if (showSettingsDialog) {
+            SettingsDialog(
+                onDismiss = { showSettingsDialog = false },
+                viewModel = viewModel
+            )
+        }
+
         // Active Ringing Full-screen Screen overlay
         activeAlarm?.let { ringingState ->
             ActiveAlarmOverlay(
@@ -331,8 +366,7 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
 
 @Composable
 fun BedsideHeader(
-    themeMode: String,
-    onThemeChange: (String) -> Unit
+    onSettingsClick: () -> Unit
 ) {
     var currentTimeStr by remember { mutableStateOf("") }
     var currentDateStr by remember { mutableStateOf("") }
@@ -411,40 +445,154 @@ fun BedsideHeader(
             }
         }
 
-        // Theme Selector Capsule at Top-End
-        Row(
+        // Settings Button at Top-End
+        IconButton(
+            onClick = onSettingsClick,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .background(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = CircleShape
                 )
                 .border(
                     width = 1.dp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = CircleShape
                 )
-                .padding(2.dp),
-            horizontalArrangement = Arrangement.spacedBy(1.dp)
+                .size(36.dp)
+                .testTag("app_settings_button")
         ) {
-            listOf("light" to "☀️", "dark" to "🌙", "system" to "⚙️").forEach { (mode, emoji) ->
-                val isSelected = themeMode == mode
-                Box(
-                    modifier = Modifier
-                        .size(26.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-                            else Color.Transparent
-                        )
-                        .clickable { onThemeChange(mode) }
-                        .testTag("theme_mode_$mode"),
-                    contentAlignment = Alignment.Center
+            Icon(
+                imageVector = Icons.Default.Settings,
+                contentDescription = "설정",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun SettingsDialog(
+    onDismiss: () -> Unit,
+    viewModel: AlarmViewModel
+) {
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    
+    Dialog(
+        onDismissRequest = onDismiss
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.85f)
+                .clip(RoundedCornerShape(24.dp))
+                .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), RoundedCornerShape(24.dp)),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // Header Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = emoji,
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            text = "앱 설정",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "닫기",
+                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // Scrollable Content
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(20.dp)
+                ) {
+                    // 1. Theme Selection Section
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+                            .padding(14.dp)
+                    ) {
+                        Text(
+                            text = "화면 테마 설정",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "애플리케이션의 색상 테마를 선택합니다.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                Triple("light", "☀️ 라이트", "라이트 모드로 적용"),
+                                Triple("dark", "🌙 다크", "다크 모드로 적용"),
+                                Triple("system", "⚙️ 시스템", "휴대폰 시스템 설정에 연동")
+                            ).forEach { (mode, label, desc) ->
+                                val isSelected = themeMode == mode
+                                Button(
+                                    onClick = { viewModel.setThemeMode(mode) },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (isSelected) MaterialTheme.colorScheme.primary 
+                                                        else MaterialTheme.colorScheme.surface,
+                                        contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary 
+                                                      else MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = if (isSelected) Color.Transparent 
+                                                else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                                    ),
+                                    shape = RoundedCornerShape(12.dp),
+                                    contentPadding = PaddingValues(vertical = 8.dp)
+                                ) {
+                                    Text(text = label, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 2. Alarm Data Backup & Recovery Card Section
+                    AlarmBackupRestoreCard(viewModel = viewModel)
                 }
             }
         }
@@ -543,8 +691,6 @@ fun AlarmsListScreen(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     textAlign = TextAlign.Center
                 )
-                Spacer(modifier = Modifier.height(24.dp))
-                AlarmBackupRestoreCard(viewModel = viewModel)
             }
         } else {
             val listState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -557,7 +703,8 @@ fun AlarmsListScreen(
                 state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
+                    .padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                contentPadding = PaddingValues(bottom = 120.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(alarmsListState.size, key = { alarmsListState[it].id }) { idx ->
@@ -624,11 +771,6 @@ fun AlarmsListScreen(
                             onTest = { onTestAlarm(alarm) }
                         )
                     }
-                }
-
-                item {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    AlarmBackupRestoreCard(viewModel = viewModel)
                 }
             }
         }
@@ -1368,6 +1510,7 @@ fun HolidaySyncScreen(
     holidays: List<Holiday>,
     syncState: SyncState,
     govtApiKey: String,
+    lastSyncDate: String,
     onSaveGovtApiKey: (String) -> Unit,
     onSyncHolidays: (Int, String?) -> Unit,
     onAddHoliday: (Holiday) -> Unit,
@@ -1381,6 +1524,7 @@ fun HolidaySyncScreen(
     var isEditingYear by remember { mutableStateOf(false) }
     var yearInputText by remember { mutableStateOf(selectedYear.toString()) }
     var showAddHolidayDialog by remember { mutableStateOf(false) }
+    var showGovHelpDialog by remember { mutableStateOf(false) }
     val filteredHolidays = holidays.filter { it.year == selectedYear }
 
     val scrollState = rememberScrollState()
@@ -1562,19 +1706,40 @@ fun HolidaySyncScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Text(
-                    text = "정부 공공데이터 인증키 (선택)",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "정부 공공데이터 인증키 (선택)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    IconButton(
+                        onClick = { showGovHelpDialog = true },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "공공데이터 인증키 사용 방법",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    val displayValue = if (isEditingKey) {
+                        serviceKeyInput
+                    } else {
+                        if (serviceKeyInput.isBlank()) "" else "*".repeat(serviceKeyInput.length)
+                    }
                     OutlinedTextField(
-                        value = serviceKeyInput,
+                        value = displayValue,
                         onValueChange = { serviceKeyInput = it },
                         placeholder = { Text("인증키 불필요 (기본 동기화 및 AI 연동 우선)", fontSize = 13.sp) },
                         singleLine = true,
@@ -1646,7 +1811,7 @@ fun HolidaySyncScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = "동기화 성공! 수집원: ${syncState.source} (${syncState.count}개 공휴일 등록완료)",
+                                text = "동기화 성공! 수집원: ${syncState.source} (최근 수집: ${lastSyncDate}) (${syncState.count}개 공휴일 등록완료)",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.secondary,
                                 modifier = Modifier.padding(12.dp),
@@ -1739,6 +1904,7 @@ fun HolidaySyncScreen(
                 )
             }
         }
+        Spacer(modifier = Modifier.navigationBarsPadding())
     }
 
     if (showAddHolidayDialog) {
@@ -1927,6 +2093,95 @@ fun HolidaySyncScreen(
             dismissButton = {
                 TextButton(onClick = { showAddHolidayDialog = false }) {
                     Text("취소")
+                }
+            }
+        )
+    }
+
+    if (showGovHelpDialog) {
+        AlertDialog(
+            onDismissRequest = { showGovHelpDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "공공데이터 인증키 안내",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "정부 공공데이터 포털(https://www.data.go.kr)에 회원가입 후 \"한국천문연구원_특일 정보\" 를 검색하여 사용 신청하면 인증키를 받아 가져올 수 있습니다.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "발급 및 적용 순서:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "1. 공공데이터포털(www.data.go.kr) 회원가입 및 로그인",
+                                modifier = Modifier.fillMaxWidth(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "2. '한국천문연구원_특일 정보' 오픈 API 검색",
+                                modifier = Modifier.fillMaxWidth(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "3. 활용신청 진행 (신청 즉시 승인 및 인증키 자동 발급)",
+                                modifier = Modifier.fillMaxWidth(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "4. 발급된 일반 인증키(Encoding 혹은 Decoding)를 복사하여 아래 입력란에 입력 후 저장",
+                                modifier = Modifier.fillMaxWidth(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    
+                    Text(
+                        text = "* 유효한 공공데이터 인증키 등록 시 매월 1일과 15일 정기 업데이트 시점에 정확한 공휴일 대조 갱신이 이루어집니다.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showGovHelpDialog = false }
+                ) {
+                    Text("확인", fontWeight = FontWeight.Bold)
                 }
             }
         )
@@ -2135,6 +2390,7 @@ fun ExecutionLogsScreen(bypassedLogs: List<BypassedLog>) {
                 }
             }
         }
+        Spacer(modifier = Modifier.navigationBarsPadding())
     }
 }
 

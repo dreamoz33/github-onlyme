@@ -65,7 +65,33 @@ class HolidayRepository(private val holidayDao: HolidayDao) {
             if (govResult is SyncResult.Success) {
                 return@withContext govResult
             } else if (govResult is SyncResult.Error) {
-                return@withContext SyncResult.Error("공공데이터 API 동기화 실패: ${govResult.message}")
+                // FALLBACK as requested: if key is invalid or triggers error, fall back to offline formula/Gemini, and show it in the success source text!
+                Log.w("HolidayRepository", "Government API key was invalid or triggered error: ${govResult.message}. Proceeding with offline calculations / AI sync fallback.")
+                
+                // Try Gemini API first if API key is provided
+                if (!geminiApiKey.isNullOrBlank()) {
+                    val geminiResult = syncWithGeminiApi(year, geminiApiKey)
+                    if (geminiResult is SyncResult.Success) {
+                        return@withContext SyncResult.Success(
+                            "공공데이터 인증키 오류로 스마트 AI 동기화 성공",
+                            geminiResult.holidaysCount
+                        )
+                    }
+                }
+                
+                // Fallback to high-fidelity offline solver
+                try {
+                    val localHolidays = calculateLocalHolidays(year)
+                    holidayDao.deleteHolidaysByYear(year)
+                    holidayDao.insertHolidays(localHolidays)
+                    Log.d("HolidayRepository", "Offline solver fallback success after government API key error")
+                    return@withContext SyncResult.Success(
+                        "공공데이터 인증키 오류로 로컬 공식 오프라인 계산식 수집 성공",
+                        localHolidays.size
+                    )
+                } catch (e: Exception) {
+                    return@withContext SyncResult.Error("공공데이터 오류 및 로컬 모델링 생성 실패: ${e.message}")
+                }
             }
         }
 

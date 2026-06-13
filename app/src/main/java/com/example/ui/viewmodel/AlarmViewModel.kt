@@ -108,6 +108,17 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
         _govtApiKey.value = key
     }
 
+    // Last Sync Date State Management for Holiday Collection Records
+    private val _lastSyncDateStr = MutableStateFlow(sharedPrefs.getString("last_holiday_sync_date", "") ?: "")
+    val lastSyncDateStr: StateFlow<String> = _lastSyncDateStr
+
+    fun updateLastSyncDate(timestamp: Long) {
+        val sdf = SimpleDateFormat("yyyy-MM-dd(E) HH:mm:ss", Locale.KOREAN)
+        val dateStr = sdf.format(Date(timestamp))
+        sharedPrefs.edit().putString("last_holiday_sync_date", dateStr).apply()
+        _lastSyncDateStr.value = dateStr
+    }
+
     // --- Alarm Backup & Restore Support Slate Flow ---
     val backupFileList = MutableStateFlow<List<String>>(emptyList())
 
@@ -144,6 +155,8 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 "com.example.ACTION_AUTO_SYNC_COMPLETED" -> {
                     Log.d("AlarmViewModel", "Automatic scheduled holiday sync finished successfully.")
+                    // Reload the saved last sync date in StateFlow
+                    _lastSyncDateStr.value = sharedPrefs.getString("last_holiday_sync_date", "") ?: ""
                 }
             }
         }
@@ -176,7 +189,10 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
             val currentYear = Calendar.getInstance().get(Calendar.YEAR)
             val existing = holidayRepository.getHolidaysForYear(currentYear)
             if (existing.isEmpty()) {
-                holidayRepository.syncHolidays(currentYear, null, null)
+                val syncResult = holidayRepository.syncHolidays(currentYear, null, null)
+                if (syncResult is SyncResult.Success) {
+                    updateLastSyncDate(System.currentTimeMillis())
+                }
             }
         }
     }
@@ -226,6 +242,7 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
             when (result) {
                 is SyncResult.Success -> {
                     _syncState.value = SyncState.Success(result.source, result.holidaysCount)
+                    updateLastSyncDate(System.currentTimeMillis())
                 }
                 is SyncResult.Error -> {
                     _syncState.value = SyncState.Error(result.message)

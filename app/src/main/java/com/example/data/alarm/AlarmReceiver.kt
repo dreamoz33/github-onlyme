@@ -53,8 +53,55 @@ class AlarmReceiver : BroadcastReceiver() {
                     val currentYear = Calendar.getInstance().get(Calendar.YEAR)
 
                     Log.d("AlarmReceiver", "Auto holiday sync running for year $currentYear")
-                    holidayRepository.syncHolidays(currentYear, resolvedKey, geminiKey)
-                    holidayRepository.syncHolidays(currentYear + 1, resolvedKey, geminiKey)
+                    val result1 = holidayRepository.syncHolidays(currentYear, resolvedKey, geminiKey)
+                    val result2 = holidayRepository.syncHolidays(currentYear + 1, resolvedKey, geminiKey)
+
+                    // If user was using a custom government API key, check if sync failed or was forced to fallback due to error
+                    if (resolvedKey != null) {
+                        var failed = false
+                        var errorMsg = ""
+
+                        if (result1 is com.example.data.repository.SyncResult.Error) {
+                            failed = true
+                            errorMsg = result1.message
+                        } else if (result1 is com.example.data.repository.SyncResult.Success && (result1.source.contains("오류") || !result1.source.contains("정부 공공데이터"))) {
+                            failed = true
+                            errorMsg = "올바르지 않은 API 응답값 또는 만료된 서비스 키"
+                        }
+
+                        if (result2 is com.example.data.repository.SyncResult.Error) {
+                            failed = true
+                            if (errorMsg.isEmpty()) errorMsg = result2.message
+                        } else if (result2 is com.example.data.repository.SyncResult.Success && (result2.source.contains("오류") || !result2.source.contains("정부 공공데이터"))) {
+                            failed = true
+                            if (errorMsg.isEmpty()) errorMsg = "올바르지 않은 API 응답값 또는 만료된 서비스 키"
+                        }
+
+                        if (failed) {
+                            Log.w("AlarmReceiver", "Public government key failed validity check. Alerting user.")
+                            // Show Toast message
+                            CoroutineScope(Dispatchers.Main).launch {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "🚨 [정기 동기화] 공공데이터 인증키 오류 발생! 로컬 수집원으로 대체 완료되었습니다.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            // Show system notification
+                            showSyncFailureNotification(context, errorMsg)
+                        }
+                    }
+
+                    // Save last sync date
+                    if (result1 is com.example.data.repository.SyncResult.Success || result2 is com.example.data.repository.SyncResult.Success) {
+                        try {
+                            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd(E) HH:mm:ss", java.util.Locale.KOREAN)
+                            val dateStr = sdf.format(java.util.Date())
+                            sharedPrefs.edit().putString("last_holiday_sync_date", dateStr).apply()
+                        } catch (e: Exception) {
+                            Log.e("AlarmReceiver", "Failed to save last sync date", e)
+                        }
+                    }
 
                     // Reschedule for next run
                     AlarmScheduler(context).scheduleNextAutoSync(context)
@@ -304,5 +351,43 @@ class AlarmReceiver : BroadcastReceiver() {
                 Log.e("AlarmReceiver", "Failed reschedule alarms on boot", e)
             }
         }
+    }
+
+    private fun showSyncFailureNotification(context: Context, errorDetail: String) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "HOLIDAY_SYNC_ALERT_CHANNEL"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "공휴일 동기화 알림",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "공공데이터 인증키 만료나 유효성 실패 시 알림"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val mainActivityIntent = Intent(context, com.example.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            context,
+            999888,
+            mainActivityIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, channelId)
+            .setContentTitle("공휴일 자동 동기화 오류")
+            .setContentText("인증키가 유효하지 않아 자동 수집에 실패했습니다. (로컬 대체 수집 완료)")
+            .setStyle(NotificationCompat.BigTextStyle().bigText("정부 공공데이터 API 인증키가 유효하지 않거나 만료되었습니다:\n$errorDetail\n\n대신 로컬 오프라인 계산 알고리즘을 이용해 안전하게 백업 및 동기화를 완료했습니다. 설정을 확인해 주세요."))
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(contentPendingIntent)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(777666, notification)
     }
 }
