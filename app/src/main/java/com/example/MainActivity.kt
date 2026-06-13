@@ -693,6 +693,7 @@ fun AlarmsListScreen(
                 )
             }
         } else {
+            val holidays by viewModel.holidays.collectAsStateWithLifecycle()
             val listState = androidx.compose.foundation.lazy.rememberLazyListState()
             var draggedItemIndex by remember { mutableStateOf<Int?>(null) }
             var dragOffset by remember { mutableStateOf(0f) }
@@ -765,6 +766,7 @@ fun AlarmsListScreen(
                     ) {
                         AlarmListItem(
                             alarm = alarm,
+                            holidays = holidays,
                             onToggleEnabled = { onToggleEnabled(alarm) },
                             onEdit = { onEditAlarm(alarm) },
                             onDelete = { onDeleteAlarm(alarm) },
@@ -1179,9 +1181,72 @@ fun AlarmBackupRestoreCard(
     }
 }
 
+fun calculateNextTriggerTimeWithHolidays(alarm: Alarm, holidaysList: List<Holiday>): Long {
+    val now = Calendar.getInstance()
+    val targetTime = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, alarm.hour)
+        set(Calendar.MINUTE, alarm.minute)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+
+    val repeatDays = alarm.repeatDays
+    val holidayDates = holidaysList.map { it.date }.toSet()
+
+    // Search up to 365 days in the future to find the actual ring date (accounting for holiday exclusions)
+    for (dayOffset in 0..365) {
+        val candidate = (targetTime.clone() as Calendar).apply {
+            add(Calendar.DAY_OF_YEAR, dayOffset)
+        }
+        
+        if (dayOffset == 0 && candidate.before(now)) {
+            continue
+        }
+
+        if (repeatDays.isNotEmpty()) {
+            val customDay = when (candidate.get(Calendar.DAY_OF_WEEK)) {
+                Calendar.MONDAY -> 1
+                Calendar.TUESDAY -> 2
+                Calendar.WEDNESDAY -> 3
+                Calendar.THURSDAY -> 4
+                Calendar.FRIDAY -> 5
+                Calendar.SATURDAY -> 6
+                Calendar.SUNDAY -> 7
+                else -> 1
+            }
+            if (!repeatDays.contains(customDay)) {
+                continue
+            }
+        }
+
+        val candidateDateStr = String.format(Locale.US, "%04d-%02d-%02d", 
+            candidate.get(Calendar.YEAR), 
+            candidate.get(Calendar.MONTH) + 1, 
+            candidate.get(Calendar.DAY_OF_MONTH)
+        )
+        val isHoliday = holidayDates.contains(candidateDateStr)
+
+        if (alarm.skipOnHolidays && isHoliday) {
+            continue
+        }
+        if (alarm.onlyOnHolidays && !isHoliday) {
+            continue
+        }
+
+        return candidate.timeInMillis
+    }
+
+    val fallback = (targetTime.clone() as Calendar)
+    if (fallback.before(now)) {
+        fallback.add(Calendar.DAY_OF_YEAR, 1)
+    }
+    return fallback.timeInMillis
+}
+
 @Composable
 fun AlarmListItem(
     alarm: Alarm,
+    holidays: List<Holiday>,
     onToggleEnabled: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -1231,35 +1296,67 @@ fun AlarmListItem(
                 }
 
                 val statusContainerColor = if (isDarkTheme) {
-                    if (alarm.isEnabled) Color.White else Color.White.copy(alpha = 0.3f)
+                    if (alarm.isEnabled) {
+                        when {
+                            alarm.onlyOnHolidays -> Color(0xFF3F1312)
+                            alarm.skipOnHolidays -> Color(0xFF143021)
+                            else -> Color(0xFF131D35)
+                        }
+                    } else {
+                        Color(0xFF202020)
+                    }
                 } else {
-                    if (alarm.isEnabled) Color(0xFF4D49FF) else Color(0xFFE5E7EB)
+                    if (alarm.isEnabled) {
+                        when {
+                            alarm.onlyOnHolidays -> Color(0xFFFEE2E2)
+                            alarm.skipOnHolidays -> Color(0xFFDCFCE7)
+                            else -> Color(0xFFE0F2FE)
+                        }
+                    } else {
+                        Color(0xFFF3F4F6)
+                    }
                 }
 
                 val statusContentColor = if (isDarkTheme) {
-                    if (alarm.isEnabled) Color.Black else Color.Black.copy(alpha = 0.6f)
+                    if (alarm.isEnabled) {
+                        when {
+                            alarm.onlyOnHolidays -> Color(0xFFF98080)
+                            alarm.skipOnHolidays -> Color(0xFF86EFAC)
+                            else -> Color(0xFF93C5FD)
+                        }
+                    } else {
+                        Color(0xFF707070)
+                    }
                 } else {
-                    if (alarm.isEnabled) Color.White else Color(0xFF9CA3AF)
+                    if (alarm.isEnabled) {
+                        when {
+                            alarm.onlyOnHolidays -> Color(0xFFD32F2F)
+                            alarm.skipOnHolidays -> Color(0xFF15803D)
+                            else -> Color(0xFF1E40AF)
+                        }
+                    } else {
+                        Color(0xFF9CA3AF)
+                    }
                 }
 
                 val indicatorColor = if (isDarkTheme) {
                     if (!alarm.isEnabled) {
-                        Color.Black.copy(alpha = 0.3f)
+                        Color(0xFF6B7280)
                     } else {
                         when {
-                            alarm.onlyOnHolidays -> Color(0xFF4D49FF)
-                            alarm.skipOnHolidays -> Color(0xFFFF5252)
-                            else -> Color(0xFF10B981)
+                            alarm.onlyOnHolidays -> Color(0xFFF98080)
+                            alarm.skipOnHolidays -> Color(0xFF86EFAC)
+                            else -> Color(0xFF93C5FD)
                         }
                     }
                 } else {
                     if (!alarm.isEnabled) {
-                        Color(0xFFD1D5DB)
+                        Color(0xFF9CA3AF)
                     } else {
                         when {
-                            alarm.onlyOnHolidays -> Color(0xFF34D399)
-                            alarm.skipOnHolidays -> Color(0xFFFCA5A5)
-                            else -> Color.White
+                            alarm.onlyOnHolidays -> Color(0xFFD32F2F)
+                            alarm.skipOnHolidays -> Color(0xFF15803D)
+                            else -> Color(0xFF1E40AF)
                         }
                     }
                 }
@@ -1272,7 +1369,7 @@ fun AlarmListItem(
                         isDarkTheme -> null
                         alarm.onlyOnHolidays -> null
                         alarm.skipOnHolidays -> null
-                        else -> androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                        else -> androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                     }
                 ) {
                     Row(
@@ -1389,8 +1486,108 @@ fun AlarmListItem(
                 )
             }
 
-            // Options description (snooze & pre-reminders)
-            if (alarm.preReminderEnabled || alarm.snoozeEnabled) {
+            // Options description (snooze & pre-reminders) and next run scheduled time
+            if (alarm.isEnabled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left side: Active option badges
+                    Row(
+                        modifier = Modifier.weight(1.0f, fill = false),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (alarm.preReminderEnabled) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(6.dp),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+                                )
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        imageOf = Icons.Default.Notifications,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Text(
+                                        text = "미리알림 ${alarm.preReminderMinutes}분 전",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.sp
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Clip
+                                    )
+                                }
+                            }
+                        }
+                        if (alarm.snoozeEnabled) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(6.dp),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+                                )
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        imageOf = Icons.Default.Refresh,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Text(
+                                        text = "다시 울림 ${alarm.snoozeInterval}분 (${alarm.snoozeRepeats}회)",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.sp
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Clip
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    // Right side: Next scheduled alarm date (without time)
+                    val nextTriggerMs = calculateNextTriggerTimeWithHolidays(alarm, holidays)
+                    val sdf = java.text.SimpleDateFormat("yyyy년 M월 d일(E)", java.util.Locale.KOREAN)
+                    val nextDateStr = sdf.format(java.util.Date(nextTriggerMs))
+                    
+                    Text(
+                        text = "다음 $nextDateStr",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.5.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else if (alarm.preReminderEnabled || alarm.snoozeEnabled) {
+                // If disabled, we still show the badges so the configurations are visible, without the next run schedule
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1398,34 +1595,73 @@ fun AlarmListItem(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (alarm.preReminderEnabled) {
                             Surface(
-                                color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
-                                shape = RoundedCornerShape(6.dp)
-                            ) {
-                                Text(
-                                    text = "미리알림 ${alarm.preReminderMinutes}분 전",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.tertiary,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    fontWeight = FontWeight.Bold
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(6.dp),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
                                 )
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        imageOf = Icons.Default.Notifications,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Text(
+                                        text = "미리알림 ${alarm.preReminderMinutes}분 전",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 9.sp
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.5f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Clip
+                                    )
+                                }
                             }
                         }
                         if (alarm.snoozeEnabled) {
                             Surface(
-                                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
-                                shape = RoundedCornerShape(6.dp)
-                            ) {
-                                Text(
-                                    text = "다시 울림 ${alarm.snoozeInterval}분 (${alarm.snoozeRepeats}회)",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(6.dp),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
                                 )
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        imageOf = Icons.Default.Refresh,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Text(
+                                        text = "다시 울림 ${alarm.snoozeInterval}분 (${alarm.snoozeRepeats}회)",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Normal,
+                                            fontSize = 9.sp
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.5f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Clip
+                                    )
+                                }
                             }
                         }
                     }
@@ -2901,6 +3137,11 @@ fun AlarmEditDialog(
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
 
+                val boxIsDarkTheme = MaterialTheme.colorScheme.background == Color(0xFF000000)
+                val regularSelectionColor = if (boxIsDarkTheme) Color(0xFF93C5FD) else Color(0xFF1E40AF)
+                val skipSelectionColor = if (boxIsDarkTheme) Color(0xFF86EFAC) else Color(0xFF15803D)
+                val onlySelectionColor = if (boxIsDarkTheme) Color(0xFFF98080) else Color(0xFFD32F2F)
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2908,12 +3149,18 @@ fun AlarmEditDialog(
                             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f),
                             RoundedCornerShape(12.dp)
                         )
-                        .padding(12.dp),
+                        .padding(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     // Regular Mode (Ring Always)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                skipOnHolidays = false
+                                onlyOnHolidays = false
+                            }
+                            .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
@@ -2922,17 +3169,36 @@ fun AlarmEditDialog(
                                 skipOnHolidays = false
                                 onlyOnHolidays = false
                             },
-                            colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = regularSelectionColor,
+                                unselectedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                            )
                         )
-                        Column {
-                            Text("법정 공휴일 공통 상시 실행", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                            Text("휴일 여부와 무관하게 매번 작동합니다.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "공휴일 / 대체공휴일 포함 상시 실행",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = regularSelectionColor
+                            )
+                            Text(
+                                text = "휴일 여부와 무관하게 매번 작동합니다.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
                         }
                     }
 
                     // Option 1: Skip on Holidays
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                skipOnHolidays = true
+                                onlyOnHolidays = false
+                            }
+                            .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
@@ -2941,17 +3207,36 @@ fun AlarmEditDialog(
                                 skipOnHolidays = true
                                 onlyOnHolidays = false
                             },
-                            colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = skipSelectionColor,
+                                unselectedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                            )
                         )
-                        Column {
-                            Text("공휴일 / 대체공휴일 제외 (울리지 않음)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
-                            Text("대한민국 빨간 장날과 대체공휴일 당일엔 알람 비가동.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "공휴일 / 대체공휴일 제외 (울리지 않음)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = skipSelectionColor
+                            )
+                            Text(
+                                text = "대한민국 빨간 장날과 대체공휴일 당일엔 알람 비가동.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
                         }
                     }
 
                     // Option 2: Active on Holidays Only
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                skipOnHolidays = false
+                                onlyOnHolidays = true
+                            }
+                            .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
@@ -2960,11 +3245,24 @@ fun AlarmEditDialog(
                                 skipOnHolidays = false
                                 onlyOnHolidays = true
                             },
-                            colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = onlySelectionColor,
+                                unselectedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                            )
                         )
-                        Column {
-                            Text("공휴일 대체공휴일만 작동 (특정일 전용)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                            Text("대한민국 공공 공휴일과 대체공휴일에만 한정 작동합니다.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "공휴일 / 대체공휴일에만 작동",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = onlySelectionColor
+                            )
+                            Text(
+                                text = "대한민국 공공 공휴일과 대체공휴일에만 한정 작동합니다.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
                         }
                     }
                 }
