@@ -1,0 +1,308 @@
+package com.example.data.alarm
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.util.Log
+import com.example.data.local.AppDatabase
+import com.example.data.repository.AlarmRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import androidx.core.app.NotificationCompat
+
+class AlarmReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action
+        val alarmId = intent.getIntExtra("ALARM_ID", -1)
+        val isSnoozeTrigger = intent.getBooleanExtra("IS_SNOOZE_TRIGGER", false)
+        val isPreReminder = intent.getBooleanExtra("IS_PRE_REMINDER", false)
+
+        Log.d("AlarmReceiver", "onReceive action: $action, alarmId: $alarmId, isSnoozeTrigger: $isSnoozeTrigger, isPreReminder: $isPreReminder")
+
+        if (action == Intent.ACTION_BOOT_COMPLETED) {
+            rescheduleAllAlarms(context)
+            AlarmScheduler(context).scheduleNextAutoSync(context)
+            return
+        }
+
+        if (action == "com.example.ACTION_AUTO_HOLIDAY_SYNC") {
+            val goAsync = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val sharedPrefs = context.getSharedPreferences("alarm_app_prefs", Context.MODE_PRIVATE)
+                    val govtKey = sharedPrefs.getString("govt_api_key", "").orEmpty()
+                    val resolvedKey = if (govtKey.isNotBlank()) govtKey else null
+
+                    val geminiKey = try {
+                        val key = com.example.BuildConfig.GEMINI_API_KEY
+                        if (key != "MY_GEMINI_API_KEY") key else null
+                    } catch (e: Exception) {
+                        null
+                    }
+
+                    val database = AppDatabase.getDatabase(context)
+                    val holidayRepository = com.example.data.repository.HolidayRepository(database.holidayDao())
+                    val currentYear = Calendar.getInstance().get(Calendar.YEAR)
+
+                    Log.d("AlarmReceiver", "Auto holiday sync running for year $currentYear")
+                    holidayRepository.syncHolidays(currentYear, resolvedKey, geminiKey)
+                    holidayRepository.syncHolidays(currentYear + 1, resolvedKey, geminiKey)
+
+                    // Reschedule for next run
+                    AlarmScheduler(context).scheduleNextAutoSync(context)
+                    
+                    // Local broadcast to update current live UI
+                    val syncSuccessBroadcast = Intent("com.example.ACTION_AUTO_SYNC_COMPLETED").apply {
+                        setPackage(context.packageName)
+                    }
+                    context.sendBroadcast(syncSuccessBroadcast)
+                } catch (e: Exception) {
+                    Log.e("AlarmReceiver", "Failed automatic holiday sync", e)
+                } finally {
+                    goAsync.finish()
+                }
+            }
+            return
+        }
+
+        if (alarmId == -1) return
+
+        if (action == "com.example.ACTION_DISMISS_PRE_REMINDER") {
+            val goAsync = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val database = AppDatabase.getDatabase(context)
+                    val alarmDao = database.alarmDao()
+                    val alarmRepository = AlarmRepository(alarmDao, context)
+                    val alarm = alarmDao.getAlarmById(alarmId)
+                    if (alarm != null) {
+                        alarmRepository.dismissEarly(alarm)
+                        Log.d("AlarmReceiver", "Alarm $alarmId pre-reminder dismissed early by user")
+                        
+                        // Send bypassed status to current UI for logging or notices
+                        val inAppBypassIntent = Intent("com.example.ACTION_ALARM_BYPASSED").apply {
+                            putExtra("ALARM_LABEL", alarm.label)
+                            putExtra("BYPASS_REASON", "미리알림 화면에서 직접 해제함")
+                            setPackage(context.packageName)
+                        }
+                        context.sendBroadcast(inAppBypassIntent)
+                    }
+                    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    notificationManager.cancel(alarmId + 300000)
+                } catch (e: Exception) {
+                    Log.e("AlarmReceiver", "Error dismissing pre-reminder early", e)
+                } finally {
+                    goAsync.finish()
+                }
+            }
+            return
+        }
+
+        val goAsync = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                processAlarmTrigger(context, alarmId, isSnoozeTrigger, isPreReminder)
+            } catch (e: Exception) {
+                Log.e("AlarmReceiver", "Error processing alarm trigger", e)
+            } finally {
+                goAsync.finish()
+            }
+        }
+    }
+
+    private suspend fun processAlarmTrigger(context: Context, alarmId: Int, isSnoozeTrigger: Boolean, isPreReminder: Boolean = false) {
+        val database = AppDatabase.getDatabase(context)
+        val alarmDao = database.alarmDao()
+        val holidayDao = database.holidayDao()
+        val alarmRepository = AlarmRepository(alarmDao, context)
+
+        val alarm = alarmDao.getAlarmById(alarmId) ?: return
+        if (!alarm.isEnabled) return
+
+        var shouldTrigger = true
+        var isTodayHoliday = false
+        var holiday: com.example.data.model.Holiday? = null
+
+        if (!isSnoozeTrigger) {
+            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.KOREAN)
+            val todayStr = sdf.format(Date())
+            isTodayHoliday = holidayDao.isHoliday(todayStr)
+            holiday = holidayDao.getHolidayByDate(todayStr)
+
+            Log.d("AlarmReceiver", "Checking holiday state on trigger: date=$todayStr, isHoliday=$isTodayHoliday, name=${holiday?.name}")
+
+            if (alarm.skipOnHolidays && isTodayHoliday) {
+                shouldTrigger = false
+                Log.d("AlarmReceiver", "Alarm ${alarm.id} bypassed due to: skipOnHolidays = true")
+            } else if (alarm.onlyOnHolidays && !isTodayHoliday) {
+                shouldTrigger = false
+                Log.d("AlarmReceiver", "Alarm ${alarm.id} bypassed due to: onlyOnHolidays = true")
+            }
+        }
+
+        if (shouldTrigger) {
+            if (isPreReminder) {
+                showPreReminderNotification(context, alarm)
+                return
+            }
+
+            // Trigger Foreground Alarm Service
+            val labelToUse = if (isSnoozeTrigger) "${alarm.label} (다시 울림)" else alarm.label
+            val serviceIntent = Intent(context, AlarmService::class.java).apply {
+                putExtra("ALARM_ID", alarm.id)
+                putExtra("ALARM_LABEL", labelToUse)
+                putExtra("ALARM_TIME", String.format(Locale.KOREAN, "%02d:%02d", alarm.hour, alarm.minute))
+                putExtra("CUSTOM_TONE_URI", alarm.customToneUri)
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+
+            // Directly start MainActivity in full screen mode, whether app is in background or closed
+            val mainActivityIntent = Intent(context, com.example.MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("ALARM_ID", alarm.id)
+                putExtra("ALARM_LABEL", labelToUse)
+                putExtra("ALARM_TIME", String.format(Locale.KOREAN, "%02d:%02d", alarm.hour, alarm.minute))
+                putExtra("CUSTOM_TONE_URI", alarm.customToneUri)
+            }
+            try {
+                context.startActivity(mainActivityIntent)
+            } catch (e: Exception) {
+                Log.e("AlarmReceiver", "Failed to directly launch MainActivity", e)
+            }
+
+            // If a fresh trigger of a snooze-enabled alarm, initialize remaining snooze count in database
+            if (!isSnoozeTrigger && alarm.snoozeEnabled) {
+                alarmDao.updateAlarm(alarm.copy(remainingSnoozes = alarm.snoozeRepeats))
+            }
+
+            // Also broadcast locally for the live UI to intercept and display the custom overlay
+            val inAppIntent = Intent("com.example.ACTION_SHOW_ALARM_SCREEN").apply {
+                putExtra("ALARM_ID", alarm.id)
+                putExtra("ALARM_LABEL", labelToUse)
+                putExtra("ALARM_TIME", String.format(Locale.KOREAN, "%02d:%02d", alarm.hour, alarm.minute))
+                putExtra("CUSTOM_TONE_NAME", alarm.customToneName ?: "기본 알람음")
+                putExtra("IS_SNOOZE_TRIGGER", isSnoozeTrigger)
+                setPackage(context.packageName)
+            }
+            context.sendBroadcast(inAppIntent)
+        } else {
+            // Send bypassed status to current UI for logging or notices
+            val reason = if (isTodayHoliday) {
+                "대체/공휴일 [${holiday?.name}]"
+            } else {
+                "평일인 관계로 공휴일 모드 활성화"
+            }
+            val inAppBypassIntent = Intent("com.example.ACTION_ALARM_BYPASSED").apply {
+                putExtra("ALARM_LABEL", alarm.label)
+                putExtra("BYPASS_REASON", reason)
+                setPackage(context.packageName)
+            }
+            context.sendBroadcast(inAppBypassIntent)
+        }
+
+        // Reschedule for repeating alarms or toggle off if non-repeating (only on initial non-snooze trigger)
+        if (!isSnoozeTrigger) {
+            if (alarm.repeatDays.isEmpty()) {
+                // Non-repeating, disable it after ringing
+                alarmRepository.updateAlarm(alarm.copy(isEnabled = false))
+            } else {
+                // Reschedule next repeating instance
+                alarmRepository.updateAlarm(alarm)
+            }
+        }
+    }
+
+    private fun showPreReminderNotification(context: Context, alarm: com.example.data.model.Alarm) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        
+        // Ensure channel is created
+        val channelId = "ALARM_PRE_REMINDER_CHANNEL"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "미리알림 (알람 예정 알림)",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "알람 작동 전에 미리 알려주는 알림"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // Action Intent for Dismiss Early
+        val dismissIntent = Intent(context, AlarmReceiver::class.java).apply {
+            action = "com.example.ACTION_DISMISS_PRE_REMINDER"
+            putExtra("ALARM_ID", alarm.id)
+        }
+        val dismissPendingIntent = PendingIntent.getBroadcast(
+            context,
+            alarm.id + 400000,
+            dismissIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // MainActivity Intent
+        val mainActivityIntent = Intent(context, com.example.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            context,
+            alarm.id + 500000,
+            mainActivityIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val timeStr = String.format(Locale.KOREAN, "%02d:%02d", alarm.hour, alarm.minute)
+        val title = "곧 알람이 울립니다: $timeStr"
+        val message = if (alarm.label.isNotBlank()) "미리알림 - ${alarm.label}" else "미리알림 - 알람 예정"
+
+        val notification = NotificationCompat.Builder(context, channelId)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setContentIntent(contentPendingIntent)
+            .setAutoCancel(true)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "미리 해제 (Dismiss early)",
+                dismissPendingIntent
+            )
+            .build()
+
+        notificationManager.notify(alarm.id + 300000, notification)
+        Log.d("AlarmReceiver", "Pre-reminder notification posted for alarm ${alarm.id}")
+    }
+
+    private fun rescheduleAllAlarms(context: Context) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val database = AppDatabase.getDatabase(context)
+            val alarmDao = database.alarmDao()
+            val alarmRepository = AlarmRepository(alarmDao, context)
+            
+            try {
+                val alarms = alarmDao.getAllAlarms().first()
+                for (alarm in alarms) {
+                    if (alarm.isEnabled) {
+                        alarmRepository.updateAlarm(alarm)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("AlarmReceiver", "Failed reschedule alarms on boot", e)
+            }
+        }
+    }
+}
