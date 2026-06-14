@@ -17,6 +17,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import androidx.core.app.NotificationCompat
+import android.media.RingtoneManager
+import android.media.AudioAttributes
 
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -117,6 +119,29 @@ class AlarmReceiver : BroadcastReceiver() {
                     goAsync.finish()
                 }
             }
+            return
+        }
+
+        if (action == "com.example.ACTION_TIMER_TRIGGER") {
+            val serviceIntent = Intent(context, AlarmService::class.java).apply {
+                putExtra("ALARM_ID", -999)
+                putExtra("ALARM_TIME", "타이머")
+                putExtra("ALARM_LABEL", "설정한 타이머 시간이 완료되었습니다.")
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+            } catch (e: Exception) {
+                Log.e("AlarmReceiver", "Failed to start AlarmService for timer finished", e)
+            }
+
+            val localIntent = Intent("com.example.ACTION_TIMER_TRIGGER").apply {
+                setPackage(context.packageName)
+            }
+            context.sendBroadcast(localIntent)
             return
         }
 
@@ -389,5 +414,85 @@ class AlarmReceiver : BroadcastReceiver() {
             .build()
 
         notificationManager.notify(777666, notification)
+    }
+
+    private fun triggerTimerFinishedNotification(context: Context) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "timer_channel",
+                "타이머 알림",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "타이머 완료 시 작동하는 알림 채널입니다."
+                enableVibration(true)
+                try {
+                    val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    setSound(defaultSoundUri, AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                    )
+                } catch (e: Exception) {
+                    Log.e("AlarmReceiver", "Error setting channel sound", e)
+                }
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        
+        val mainActivityIntent = Intent(context, com.example.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            context,
+            999222,
+            mainActivityIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, "timer_channel")
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("⏰ 타이머 종료!")
+            .setContentText("설정한 타이머 시간이 완료되었습니다.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(contentPendingIntent)
+            .setAutoCancel(true)
+            .setSound(defaultSoundUri)
+            .setVibrate(longArrayOf(0, 500, 250, 500, 250, 500))
+            .build()
+
+        notificationManager.notify(999, notification)
+
+        // Play default notification ringtone
+        try {
+            val ringtone = RingtoneManager.getRingtone(context, defaultSoundUri)
+            ringtone?.play()
+        } catch (e: Exception) {
+            Log.e("AlarmReceiver", "Failed to play default ringtone in background", e)
+        }
+
+        // Vibrate the device
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                vibratorManager.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            }
+
+            val vibratePattern = longArrayOf(0, 500, 250, 500, 250, 500)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(android.os.VibrationEffect.createWaveform(vibratePattern, -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(vibratePattern, -1)
+            }
+        } catch (e: Exception) {
+            Log.e("AlarmReceiver", "Failed to vibrate in background", e)
+        }
     }
 }

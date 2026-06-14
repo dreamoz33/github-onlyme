@@ -1,5 +1,7 @@
 package com.example
 
+import kotlin.math.roundToInt
+
 import android.content.Context
 import android.content.ClipboardManager
 import android.content.ClipData
@@ -32,6 +34,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.launch
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -45,6 +48,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.activity.compose.BackHandler
@@ -143,12 +147,19 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
     val holidays by viewModel.holidays.collectAsStateWithLifecycle()
     val syncState by viewModel.syncState.collectAsStateWithLifecycle()
     val activeAlarm by viewModel.activeRingingAlarm.collectAsStateWithLifecycle()
-    val bypassedLogs by viewModel.bypassedLogs.collectAsStateWithLifecycle()
+    val timerRemainingSeconds by viewModel.timerRemainingSeconds.collectAsStateWithLifecycle()
+    val timerTotalSeconds by viewModel.timerTotalSeconds.collectAsStateWithLifecycle()
+    val timerIsRunning by viewModel.timerIsRunning.collectAsStateWithLifecycle()
     val govtApiKey by viewModel.govtApiKey.collectAsStateWithLifecycle()
     val lastSyncDate by viewModel.lastSyncDateStr.collectAsStateWithLifecycle()
 
     var showEditDialog by remember { mutableStateOf<Alarm?>(null) }
-    var currentTab by remember { mutableIntStateOf(0) } // 0 = Alarms, 1 = Holiday Sync, 2 = Logs
+    val pagerState = androidx.compose.foundation.pager.rememberPagerState(
+        initialPage = 0,
+        pageCount = { 3 }
+    )
+    val currentTab = pagerState.currentPage
+    val coroutineScope = rememberCoroutineScope()
     var showSettingsDialog by remember { mutableStateOf(false) }
 
     // Request poster permissions on Android 13+
@@ -178,88 +189,60 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
             )
 
             // Tabs Selector
-            TabRowSection(currentTab = currentTab, onTabSelected = { currentTab = it })
+            TabRowSection(currentTab = currentTab, onTabSelected = { target ->
+                coroutineScope.launch {
+                    pagerState.animateScrollToPage(target)
+                }
+            })
 
-            // Content Area based on current tab with swipe gestures and polished horizontal navigation transitions
-            var dragAmountCumulative by remember { mutableStateOf(0f) }
-
-            Box(
+            // Content Area based on current tab with smooth swipe and parallax transition (HorizontalPager)
+            androidx.compose.foundation.pager.HorizontalPager(
+                state = pagerState,
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .pointerInput(currentTab) {
-                        detectHorizontalDragGestures(
-                            onDragStart = { dragAmountCumulative = 0f },
-                            onHorizontalDrag = { change, dragAmount ->
-                                change.consume()
-                                dragAmountCumulative += dragAmount
-                            },
-                            onDragEnd = {
-                                if (dragAmountCumulative > 120f) {
-                                    // Swipe Right (Move to left tab)
-                                    if (currentTab > 0) {
-                                        currentTab--
-                                    }
-                                } else if (dragAmountCumulative < -120f) {
-                                    // Swipe Left (Move to right tab)
-                                    if (currentTab < 2) {
-                                        currentTab++
-                                    }
-                                }
-                            }
-                        )
-                    }
-            ) {
-                AnimatedContent(
-                    targetState = currentTab,
-                    transitionSpec = {
-                        if (targetState > initialState) {
-                            // Slide from right to left
-                            (slideInHorizontally { width -> width } + fadeIn()).togetherWith(
-                                slideOutHorizontally { width -> -width } + fadeOut()
-                            )
-                        } else {
-                            // Slide from left to right
-                            (slideInHorizontally { width -> -width } + fadeIn()).togetherWith(
-                                slideOutHorizontally { width -> width } + fadeOut()
-                            )
-                        }
-                    },
-                    label = "TabTransition"
-                ) { targetPage ->
-                    when (targetPage) {
-                        0 -> AlarmsListScreen(
-                            alarms = alarms,
-                            onToggleEnabled = { viewModel.toggleAlarm(it) },
-                            onEditAlarm = { showEditDialog = it },
-                            onDeleteAlarm = { viewModel.deleteAlarm(it) },
-                            onTestAlarm = { viewModel.testTriggerAlarmNow(it) },
-                            onAddAlarm = { 
-                                val defaultUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM)?.toString()
-                                showEditDialog = Alarm(
-                                    hour = 7, 
-                                    minute = 0, 
-                                    label = "새 알람", 
-                                    customToneUri = defaultUri, 
-                                    customToneName = "기본 알람 벨소리"
-                                ) 
-                            },
-                            onReorderAlarms = { viewModel.updateAlarmsOrder(it) },
-                            viewModel = viewModel
-                        )
-                        1 -> HolidaySyncScreen(
-                            holidays = holidays,
-                            syncState = syncState,
-                            govtApiKey = govtApiKey,
-                            lastSyncDate = lastSyncDate,
-                            onSaveGovtApiKey = { viewModel.saveGovtApiKey(it) },
-                            onSyncHolidays = { year, govtKey -> viewModel.syncHolidays(year, govtKey) },
-                            onAddHoliday = { viewModel.addHoliday(it) },
-                            onDeleteHoliday = { viewModel.deleteHoliday(it) },
-                            onDeleteYearAll = { year -> viewModel.deleteHolidaysBySelectedYear(year) }
-                        )
-                        2 -> ExecutionLogsScreen(bypassedLogs = bypassedLogs)
-                    }
+                    .fillMaxWidth(),
+                verticalAlignment = androidx.compose.ui.Alignment.Top
+            ) { page ->
+                when (page) {
+                    0 -> AlarmsListScreen(
+                        alarms = alarms,
+                        onToggleEnabled = { viewModel.toggleAlarm(it) },
+                        onEditAlarm = { showEditDialog = it },
+                        onDeleteAlarm = { viewModel.deleteAlarm(it) },
+                        onTestAlarm = { viewModel.testTriggerAlarmNow(it) },
+                        onAddAlarm = { 
+                            val defaultUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM)?.toString()
+                            showEditDialog = Alarm(
+                                hour = 7, 
+                                minute = 0, 
+                                label = "새 알람", 
+                                customToneUri = defaultUri, 
+                                customToneName = "기본 알람 벨소리"
+                            ) 
+                        },
+                        onReorderAlarms = { viewModel.updateAlarmsOrder(it) },
+                        viewModel = viewModel
+                    )
+                    1 -> HolidaySyncScreen(
+                        holidays = holidays,
+                        syncState = syncState,
+                        govtApiKey = govtApiKey,
+                        lastSyncDate = lastSyncDate,
+                        onSaveGovtApiKey = { viewModel.saveGovtApiKey(it) },
+                        onSyncHolidays = { year, govtKey -> viewModel.syncHolidays(year, govtKey) },
+                        onAddHoliday = { viewModel.addHoliday(it) },
+                        onDeleteHoliday = { viewModel.deleteHoliday(it) },
+                        onDeleteYearAll = { year -> viewModel.deleteHolidaysBySelectedYear(year) }
+                    )
+                    2 -> TimerScreen(
+                        remainingSeconds = timerRemainingSeconds,
+                        totalSeconds = timerTotalSeconds,
+                        isRunning = timerIsRunning,
+                        onStartTimer = { viewModel.startTimer(it) },
+                        onPauseTimer = { viewModel.pauseTimer() },
+                        onResumeTimer = { viewModel.resumeTimer() },
+                        onResetTimer = { viewModel.resetTimer() }
+                    )
                 }
             }
         }
@@ -632,8 +615,8 @@ fun TabRowSection(currentTab: Int, onTabSelected: (Int) -> Unit) {
         Tab(
             selected = currentTab == 2,
             onClick = { onTabSelected(2) },
-            text = { Text("실행 로그", fontWeight = if (currentTab == 2) FontWeight.Bold else FontWeight.Medium) },
-            icon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+            text = { Text("타이머", fontWeight = if (currentTab == 2) FontWeight.Bold else FontWeight.Medium) },
+            icon = { Icon(Icons.Default.HourglassEmpty, contentDescription = null) },
             selectedContentColor = MaterialTheme.colorScheme.primary,
             unselectedContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
         )
@@ -663,7 +646,7 @@ fun AlarmsListScreen(
     onReorderAlarms: (List<Alarm>) -> Unit,
     viewModel: AlarmViewModel
 ) {
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Box(modifier = Modifier.fillMaxSize()) {
         if (alarms.isEmpty()) {
             Column(
                 modifier = Modifier
@@ -694,71 +677,196 @@ fun AlarmsListScreen(
             }
         } else {
             val holidays by viewModel.holidays.collectAsStateWithLifecycle()
+            val useCustomOrder by viewModel.useCustomOrder.collectAsStateWithLifecycle()
             val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-            var draggedItemIndex by remember { mutableStateOf<Int?>(null) }
+            var draggedAlarmId by remember { mutableStateOf<Int?>(null) }
             var dragOffset by remember { mutableStateOf(0f) }
             val alarmsListState = remember(alarms) { mutableStateListOf<Alarm>().apply { clear(); addAll(alarms) } }
             val density = LocalDensity.current
 
-            androidx.compose.foundation.lazy.LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp),
-                contentPadding = PaddingValues(bottom = 120.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            LaunchedEffect(draggedAlarmId) {
+                if (draggedAlarmId != null) {
+                    while (true) {
+                        val layoutInfo = listState.layoutInfo
+                        val draggedItemInfo = layoutInfo.visibleItemsInfo.find { it.key == draggedAlarmId }
+                        if (draggedItemInfo != null) {
+                            val visualTop = draggedItemInfo.offset + dragOffset
+                            val visualBottom = visualTop + draggedItemInfo.size
+                            val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+                            
+                            val scrollThreshold = with(density) { 60.dp.toPx() }
+                            val topThreshold = scrollThreshold
+                            val bottomThreshold = viewportHeight - scrollThreshold
+                            
+                            var scrollAmount = 0f
+                            if (visualTop < topThreshold) {
+                                val ratio = ((topThreshold - visualTop) / topThreshold).coerceIn(0f, 1f)
+                                scrollAmount = -with(density) { 12.dp.toPx() } * ratio
+                            } else if (visualBottom > bottomThreshold) {
+                                val ratio = ((visualBottom - bottomThreshold) / scrollThreshold).coerceIn(0f, 1f)
+                                scrollAmount = with(density) { 12.dp.toPx() } * ratio
+                            }
+                            
+                            if (scrollAmount != 0f) {
+                                val consumed = listState.scrollBy(scrollAmount)
+                                dragOffset += consumed
+                            }
+                        }
+                        kotlinx.coroutines.delay(16)
+                    }
+                }
+            }
+
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 6.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (useCustomOrder) Icons.Default.Menu else Icons.Default.List,
+                            contentDescription = null,
+                            tint = if (useCustomOrder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (useCustomOrder) "💡 사용자 지정 순서 정렬 상태" else "⏰ 빠른 시간순 정렬 상태",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (useCustomOrder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(
+                        onClick = { viewModel.resetAlarmsOrder() },
+                        enabled = useCustomOrder,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text(
+                            text = "정렬 초기화(시간순)", 
+                            style = MaterialTheme.typography.labelMedium, 
+                            fontWeight = FontWeight.Bold,
+                            color = if (useCustomOrder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        )
+                    }
+                }
+
+                androidx.compose.foundation.lazy.LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 4.dp),
+                    contentPadding = PaddingValues(bottom = 120.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                 items(alarmsListState.size, key = { alarmsListState[it].id }) { idx ->
                     val alarm = alarmsListState[idx]
+                    val isDragged = draggedAlarmId != null && alarm.id == draggedAlarmId
+                    
+                    val translationYForIndex = remember(draggedAlarmId, dragOffset) {
+                        if (draggedAlarmId == null || isDragged) {
+                            0f
+                        } else {
+                            val origIdx = alarmsListState.indexOfFirst { it.id == draggedAlarmId }
+                            if (origIdx != -1) {
+                                val itemHeightPx = with(density) { 140.dp.toPx() }
+                                val targetIdx = (origIdx + (dragOffset / itemHeightPx).roundToInt()).coerceIn(0, alarmsListState.lastIndex)
+                                
+                                if (targetIdx > origIdx) {
+                                    if (idx in (origIdx + 1)..targetIdx) {
+                                        -itemHeightPx
+                                    } else {
+                                        0f
+                                    }
+                                } else if (targetIdx < origIdx) {
+                                    if (idx in targetIdx..(origIdx - 1)) {
+                                        itemHeightPx
+                                    } else {
+                                        0f
+                                    }
+                                } else {
+                                    0f
+                                }
+                            } else {
+                                0f
+                            }
+                        }
+                    }
+
+                    val animatedTranslationY by animateFloatAsState(
+                        targetValue = translationYForIndex,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioLowBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        ),
+                        label = "shift_anim"
+                    )
+
+                    val animatedScale by animateFloatAsState(
+                        targetValue = if (isDragged) 0.92f else 1.0f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMedium
+                        ),
+                        label = "drag_scale"
+                    )
+                    
+                    val animatedElevation by animateFloatAsState(
+                        targetValue = if (isDragged) 24f else 0f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessLow
+                        ),
+                        label = "drag_elevation"
+                    )
+
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .animateItem(
+                                placementSpec = spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                )
+                            )
                             .graphicsLayer {
-                                translationY = if (draggedItemIndex == idx) dragOffset else 0f
-                                scaleX = if (draggedItemIndex == idx) 1.04f else 1.0f
-                                scaleY = if (draggedItemIndex == idx) 1.04f else 1.0f
-                                shadowElevation = if (draggedItemIndex == idx) 12f else 0f
+                                translationY = if (isDragged) dragOffset else animatedTranslationY
+                                scaleX = animatedScale
+                                scaleY = animatedScale
+                                shadowElevation = animatedElevation
                             }
-                            .pointerInput(idx) {
+                            .pointerInput(alarm.id) {
                                 detectDragGesturesAfterLongPress(
                                     onDragStart = {
-                                        draggedItemIndex = idx
+                                        draggedAlarmId = alarm.id
                                         dragOffset = 0f
                                     },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
                                         dragOffset += dragAmount.y
-
-                                        val fromIndex = draggedItemIndex
-                                        if (fromIndex != null) {
-                                            val itemHeightPx = with(density) { 140.dp.toPx() } // dynamic height approximation with padding
-                                            val targetIndex = if (dragOffset > itemHeightPx / 2) {
-                                                fromIndex + 1
-                                            } else if (dragOffset < -itemHeightPx / 2) {
-                                                fromIndex - 1
-                                            } else {
-                                                fromIndex
-                                            }
-
-                                            if (targetIndex in alarmsListState.indices && targetIndex != fromIndex) {
-                                                val movingItem = alarmsListState.removeAt(fromIndex)
-                                                alarmsListState.add(targetIndex, movingItem)
-                                                draggedItemIndex = targetIndex
-                                                dragOffset = if (targetIndex > fromIndex) {
-                                                    dragOffset - itemHeightPx
-                                                } else {
-                                                    dragOffset + itemHeightPx
-                                                }
-                                            }
-                                        }
                                     },
                                     onDragEnd = {
-                                        draggedItemIndex = null
+                                        val origIdx = alarmsListState.indexOfFirst { it.id == draggedAlarmId }
+                                        if (origIdx != -1) {
+                                            val itemHeightPx = with(density) { 140.dp.toPx() }
+                                            val targetIdx = (origIdx + (dragOffset / itemHeightPx).roundToInt()).coerceIn(0, alarmsListState.lastIndex)
+                                            if (targetIdx != origIdx) {
+                                                val movingItem = alarmsListState.removeAt(origIdx)
+                                                alarmsListState.add(targetIdx, movingItem)
+                                                onReorderAlarms(alarmsListState.toList())
+                                            }
+                                        }
+                                        draggedAlarmId = null
                                         dragOffset = 0f
-                                        onReorderAlarms(alarmsListState.toList())
                                     },
                                     onDragCancel = {
-                                        draggedItemIndex = null
+                                        draggedAlarmId = null
                                         dragOffset = 0f
                                     }
                                 )
@@ -775,6 +883,7 @@ fun AlarmsListScreen(
                     }
                 }
             }
+        }
         }
     }
 }
@@ -1766,7 +1875,7 @@ fun HolidaySyncScreen(
     val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .padding(16.dp)
             .verticalScroll(scrollState),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -1786,13 +1895,6 @@ fun HolidaySyncScreen(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "대한민국 공휴일 및 대체공휴일은 매년 정부령에 맞춰 변경될 수 있습니다. 아래를 설정하여 자동으로 최신 정보를 동기화하세요.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-                
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Text(
@@ -1947,7 +2049,7 @@ fun HolidaySyncScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = "정부 공공데이터 인증키 (선택)",
+                        text = "정부 공공데이터 API (선택)",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Medium
                     )
@@ -1957,7 +2059,7 @@ fun HolidaySyncScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Info,
-                            contentDescription = "공공데이터 인증키 사용 방법",
+                            contentDescription = "공공데이터 API 사용 방법",
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)
                         )
@@ -1977,7 +2079,7 @@ fun HolidaySyncScreen(
                     OutlinedTextField(
                         value = displayValue,
                         onValueChange = { serviceKeyInput = it },
-                        placeholder = { Text("인증키 불필요 (기본 동기화 및 AI 연동 우선)", fontSize = 13.sp) },
+                        placeholder = { Text("API 불필요 (기본 동기화 및 AI 연동 우선)", fontSize = 13.sp) },
                         singleLine = true,
                         enabled = isEditingKey,
                         colors = OutlinedTextFieldDefaults.colors(
@@ -2348,7 +2450,7 @@ fun HolidaySyncScreen(
                         tint = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "공공데이터 인증키 안내",
+                        text = "공공데이터 API 안내",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -2359,7 +2461,7 @@ fun HolidaySyncScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "정부 공공데이터 포털(https://www.data.go.kr)에 회원가입 후 \"한국천문연구원_특일 정보\" 를 검색하여 사용 신청하면 인증키를 받아 가져올 수 있습니다.",
+                        text = "정부 공공데이터 포털(https://www.data.go.kr)에 회원가입 후 \"한국천문연구원_특일 정보\" 를 검색하여 사용 신청하면 API(인증키)를 받아 가져올 수 있습니다.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
@@ -2392,13 +2494,13 @@ fun HolidaySyncScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = "3. 활용신청 진행 (신청 즉시 승인 및 인증키 자동 발급)",
+                                text = "3. 활용신청 진행 (신청 즉시 승인 및 API 인증키 자동 발급)",
                                 modifier = Modifier.fillMaxWidth(),
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = "4. 발급된 일반 인증키(Encoding 혹은 Decoding)를 복사하여 아래 입력란에 입력 후 저장",
+                                text = "4. 발급된 일반 API(Encoding 혹은 Decoding)를 복사하여 아래 입력란에 입력 후 저장",
                                 modifier = Modifier.fillMaxWidth(),
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2407,7 +2509,7 @@ fun HolidaySyncScreen(
                     }
                     
                     Text(
-                        text = "* 유효한 공공데이터 인증키 등록 시 매월 1일과 15일 정기 업데이트 시점에 정확한 공휴일 대조 갱신이 이루어집니다.",
+                        text = "* 유효한 공공데이터 API 등록 시 매월 1일과 15일 정기 업데이트 시점에 정확한 공휴일 대조 갱신이 이루어집니다.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -2522,111 +2624,450 @@ fun HolidayItemRow(
     }
 }
 
-// Tab 3: Execution Log Tracker
+// Tab 3: Beautiful, Functional Countdown Timer Screen
 @Composable
-fun ExecutionLogsScreen(bypassedLogs: List<BypassedLog>) {
+fun TimerScreen(
+    remainingSeconds: Long,
+    totalSeconds: Long,
+    isRunning: Boolean,
+    onStartTimer: (Long) -> Unit,
+    onPauseTimer: () -> Unit,
+    onResumeTimer: () -> Unit,
+    onResetTimer: () -> Unit
+) {
+    var pickerHour by remember { mutableStateOf(0) }
+    var pickerMinute by remember { mutableStateOf(0) }
+    var pickerSecond by remember { mutableStateOf(0) }
+
     val scrollState = rememberScrollState()
+
     Column(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .padding(16.dp)
-            .verticalScroll(scrollState)
+            .verticalScroll(scrollState),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Top
     ) {
-        Text(
-            text = "실시간 알람 바이패스 이력",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "공휴일 제외 기능 활성화 시, 설정한 날이 공휴일 및 대체공휴일에 닿았을 때 자동으로 알람을 비가동(Bypass)한 로그 정보입니다.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (bypassedLogs.isEmpty()) {
+        if (totalSeconds > 0) {
+            // Timer Running / Paused / Overtime UI Block (Modern Ring Progress & Big Glowing Digital Display)
             Box(
+                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center
+                    .size(280.dp)
+                    .background(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.15f),
+                        shape = CircleShape
+                    )
+                    .padding(24.dp)
             ) {
+                val progress = if (remainingSeconds <= 0L) {
+                    1f
+                } else {
+                    remainingSeconds.toFloat() / totalSeconds.toFloat()
+                }
+                val animatedProgress by animateFloatAsState(
+                    targetValue = progress,
+                    animationSpec = tween(
+                        durationMillis = if (isRunning && remainingSeconds > 0) 1000 else 0,
+                        easing = LinearEasing
+                    ),
+                    label = "TimerProgress"
+                )
+                CircularProgressIndicator(
+                    progress = { animatedProgress },
+                    modifier = Modifier.fillMaxSize(),
+                    color = if (remainingSeconds <= 0L) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
+                    strokeWidth = 8.dp,
+                    strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
+                
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageOf = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f),
-                        modifier = Modifier.size(48.dp)
+                    val formatted = if (remainingSeconds < 0L) {
+                        val absSeconds = Math.abs(remainingSeconds)
+                        val h = absSeconds / 3600
+                        val m = (absSeconds % 3600) / 60
+                        val s = absSeconds % 60
+                        String.format(Locale.KOREAN, "-%02d:%02d:%02d", h, m, s)
+                    } else {
+                        val h = remainingSeconds / 3600
+                        val m = (remainingSeconds % 3600) / 60
+                        val s = remainingSeconds % 60
+                        String.format(Locale.KOREAN, "%02d:%02d:%02d", h, m, s)
+                    }
+
+                    Text(
+                        text = formatted,
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = if (remainingSeconds <= 0L) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "기록된 바이패스 건이 없습니다",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        text = if (remainingSeconds <= 0L) "타이머 완료 (알람 작동 중)" else (if (isRunning) "카운트다운 중" else "일시정지됨"),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (remainingSeconds <= 0L) MaterialTheme.colorScheme.error else (if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary)
                     )
                 }
             }
-        } else {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                bypassedLogs.forEach { log ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            if (remainingSeconds <= 0L) {
+                // When finished/overtime, show a single large "Dismiss" (해제) button instead of pause/resume/reset 
+                Button(
+                    onClick = onResetTimer,
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .height(56.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)
+                ) {
+                    Icon(
+                        imageOf = Icons.Default.Close,
+                        contentDescription = "해제",
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onError
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "해제 (알람 끄기)",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onError
+                    )
+                }
+            } else {
+                // Control Actions Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally)
+                ) {
+                    Button(
+                        onClick = {
+                            if (isRunning) onPauseTimer() else onResumeTimer()
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isRunning) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                        )
                     ) {
-                        Row(
+                        Icon(
+                            imageOf = if (isRunning) Icons.Default.Close else Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (isRunning) "일시정지" else "시작 / 재개", fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = onResetTimer,
+                        modifier = Modifier.weight(1f),
+                        border = androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(
+                            imageOf = Icons.Default.Refresh,
+                            contentDescription = "초기화",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("초기화", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        } else {
+            // Timer Idle / Configuration UI Block
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                // Time Configuration Picker Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TimerPickerField(
+                        value = pickerHour,
+                        label = "시간",
+                        range = 0..99,
+                        onValueChange = { pickerHour = it }
+                    )
+                    Text(
+                        text = ":",
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TimerPickerField(
+                        value = pickerMinute,
+                        label = "분",
+                        range = 0..59,
+                        onValueChange = { pickerMinute = it }
+                    )
+                    Text(
+                        text = ":",
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TimerPickerField(
+                        value = pickerSecond,
+                        label = "초",
+                        range = 0..59,
+                        onValueChange = { pickerSecond = it }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Custom Time Start & Local Reset Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(0.9f),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            val total = (pickerHour * 3600L) + (pickerMinute * 60L) + pickerSecond
+                            if (total > 0L) {
+                                onStartTimer(total)
+                            }
+                        },
+                        enabled = (pickerHour > 0 || pickerMinute > 0 || pickerSecond > 0),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(imageOf = Icons.Default.PlayArrow, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("시작", fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            pickerHour = 0
+                            pickerMinute = 0
+                            pickerSecond = 0
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Icon(imageOf = Icons.Default.Refresh, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("초기화", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                val addTime = { secsToAdd: Long ->
+                    val currentTotal = (pickerHour * 3600L) + (pickerMinute * 60L) + pickerSecond
+                    val newTotal = (currentTotal + secsToAdd).coerceIn(0L, 359999L)
+                    pickerHour = (newTotal / 3600).toInt()
+                    pickerMinute = ((newTotal % 3600) / 60).toInt()
+                    pickerSecond = (newTotal % 60).toInt()
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val row1 = listOf(
+                        "+1분" to 60L,
+                        "+3분" to 180L,
+                        "+5분" to 300L
+                    )
+                    row1.forEach { (title, secs) ->
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .weight(1f)
+                                .height(56.dp)
+                                .clickable { addTime(secs) }
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
-                                        CircleShape
-                                    ),
+                                modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageOf = Icons.Default.Notifications,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(20.dp)
+                                Text(
+                                    text = title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val row2 = listOf(
+                        "+10분" to 600L,
+                        "+30분" to 1800L,
+                        "+1시간" to 3600L
+                    )
+                    row2.forEach { (title, secs) ->
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(56.dp)
+                                .clickable { addTime(secs) }
+                        ) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Text(
-                                    text = "알람[${log.label}] 바이패스 완료",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "사유: ${log.reason}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.secondary
+                                    text = title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
-                            Text(
-                                text = SimpleDateFormat("HH:mm", Locale.KOREAN).format(Date(log.timestamp)),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                            )
                         }
                     }
                 }
             }
         }
         Spacer(modifier = Modifier.navigationBarsPadding())
+    }
+}
+
+@Composable
+fun TimerPickerField(
+    value: Int,
+    label: String,
+    range: IntRange,
+    onValueChange: (Int) -> Unit
+) {
+    var textState by remember { mutableStateOf(String.format(Locale.KOREAN, "%02d", value)) }
+    var isFocused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(value) {
+        if (!isFocused) {
+            textState = String.format(Locale.KOREAN, "%02d", value)
+        }
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(horizontal = 8.dp)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        IconButton(
+            onClick = {
+                val next = value + 1
+                if (next in range) {
+                    onValueChange(next)
+                } else {
+                    onValueChange(range.first)
+                }
+            },
+            modifier = Modifier
+                .size(36.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+        ) {
+            Text("▲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+
+        androidx.compose.foundation.text.BasicTextField(
+            value = textState,
+            onValueChange = { newValue ->
+                val filtered = newValue.filter { it.isDigit() }.take(2)
+                textState = filtered
+                val parsed = filtered.toIntOrNull() ?: 0
+                onValueChange(parsed.coerceIn(range.first, range.last))
+            },
+            textStyle = androidx.compose.ui.text.TextStyle(
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurface
+            ),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number
+            ),
+            modifier = Modifier
+                .width(56.dp)
+                .height(56.dp)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                .onFocusChanged { focusState ->
+                    isFocused = focusState.isFocused
+                    if (focusState.isFocused) {
+                        textState = ""
+                    } else {
+                        textState = String.format(Locale.KOREAN, "%02d", value)
+                    }
+                },
+            decorationBox = { innerTextField ->
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    if (textState.isEmpty() && !isFocused) {
+                        Text(
+                            text = "00",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+        IconButton(
+            onClick = {
+                val prev = value - 1
+                if (prev in range) {
+                    onValueChange(prev)
+                } else {
+                    onValueChange(range.last)
+                }
+            },
+            modifier = Modifier
+                .size(36.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+        ) {
+            Text("▼", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -2698,20 +3139,30 @@ fun AlarmEditDialog(
         }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(24.dp),
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 80.dp), // Clear soft navigation buttons at the bottom of the screen
+            contentAlignment = Alignment.TopCenter
         ) {
-            Column(
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(24.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(20.dp)
-                    .verticalScroll(rememberScrollState())
+                    .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
             ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
                 Text(
                     text = if (alarm.id == 0) "새 알람 만들기" else "알람 설정 편집",
                     style = MaterialTheme.typography.titleLarge,
@@ -3477,7 +3928,7 @@ fun AlarmEditDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Final actions row
                 Row(
@@ -3517,6 +3968,7 @@ fun AlarmEditDialog(
                     }
                 }
             }
+        }
         }
     }
 }
@@ -4178,7 +4630,7 @@ fun WheelPicker(
         ) {
             if (buttonPosition == "LEFT") {
                 sideButtonsColumn()
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(16.dp))
             } else if (buttonPosition == "LEFT_RIGHT") {
                 // Minus on Left
                 androidx.compose.material3.IconButton(
@@ -4212,7 +4664,7 @@ fun WheelPicker(
             centerWheelBox()
 
             if (buttonPosition == "RIGHT") {
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(16.dp))
                 sideButtonsColumn()
             } else if (buttonPosition == "LEFT_RIGHT") {
                 Spacer(modifier = Modifier.width(16.dp)) // spread out slightly as requested!

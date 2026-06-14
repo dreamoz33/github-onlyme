@@ -1,5 +1,7 @@
 package com.example.ui.viewmodel
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -25,7 +27,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import androidx.core.app.NotificationCompat
 import java.io.File
 import java.util.*
 import android.media.RingtoneManager
@@ -66,12 +74,25 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
     private val alarmRepository = AlarmRepository(database.alarmDao(), application)
     private val holidayRepository = HolidayRepository(database.holidayDao())
 
-    val alarms: StateFlow<List<Alarm>> = alarmRepository.allAlarms
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyList()
-        )
+    private val sharedPrefs = application.getSharedPreferences("alarm_app_prefs", Context.MODE_PRIVATE)
+
+    private val _useCustomOrder = MutableStateFlow(sharedPrefs.getBoolean("use_custom_order", false))
+    val useCustomOrder: StateFlow<Boolean> = _useCustomOrder
+
+    val alarms: StateFlow<List<Alarm>> = combine(
+        alarmRepository.allAlarms,
+        _useCustomOrder
+    ) { alarmList, useCustom ->
+        if (useCustom) {
+            alarmList.sortedBy { it.customOrder }
+        } else {
+            alarmList.sortedWith(compareBy({ it.hour }, { it.minute }))
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
 
     val holidays: StateFlow<List<Holiday>> = holidayRepository.allHolidays
         .stateIn(
@@ -80,7 +101,16 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
             initialValue = emptyList()
         )
 
-    private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)
+    private val _syncState = MutableStateFlow<SyncState>(
+        if (sharedPrefs.getBoolean("holiday_sync_success", false)) {
+            SyncState.Success(
+                sharedPrefs.getString("holiday_sync_source", "온라인") ?: "온라인",
+                sharedPrefs.getInt("holiday_sync_count", 0)
+            )
+        } else {
+            SyncState.Idle
+        }
+    )
     val syncState: StateFlow<SyncState> = _syncState
 
     private val _activeRingingAlarm = MutableStateFlow<ActiveAlarmState?>(null)
@@ -90,8 +120,7 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
     val bypassedLogs: StateFlow<List<BypassedLog>> = _bypassedLogs
 
     // Theme Preference State Management
-    private val sharedPrefs = application.getSharedPreferences("alarm_app_prefs", Context.MODE_PRIVATE)
-    private val _themeMode = MutableStateFlow(sharedPrefs.getString("theme_mode", "dark") ?: "dark")
+    private val _themeMode = MutableStateFlow(sharedPrefs.getString("theme_mode", "system") ?: "system")
     val themeMode: StateFlow<String> = _themeMode
 
     fun setThemeMode(mode: String) {
@@ -106,6 +135,265 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
     fun saveGovtApiKey(key: String) {
         sharedPrefs.edit().putString("govt_api_key", key).apply()
         _govtApiKey.value = key
+    }
+
+    // --- Timer State Management ---
+    private val _timerRemainingSeconds = MutableStateFlow(0L)
+    val timerRemainingSeconds: StateFlow<Long> = _timerRemainingSeconds
+
+    private val _timerTotalSeconds = MutableStateFlow(0L)
+    val timerTotalSeconds: StateFlow<Long> = _timerTotalSeconds
+
+    private val _timerIsRunning = MutableStateFlow(false)
+    val timerIsRunning: StateFlow<Boolean> = _timerIsRunning
+
+    private var timerJob: kotlinx.coroutines.Job? = null
+    private var isTimerAlarmTriggered = false
+
+    private fun scheduleBackgroundTimer(context: Context, triggerTimeMs: Long) {
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, com.example.data.alarm.AlarmReceiver::class.java).apply {
+            action = "com.example.ACTION_TIMER_TRIGGER"
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            999111,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (am.canScheduleExactAlarms()) {
+                    am.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerTimeMs,
+                        pendingIntent
+                    )
+                } else {
+                    am.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerTimeMs,
+                        pendingIntent
+                    )
+                }
+            } else {
+                am.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerTimeMs,
+                    pendingIntent
+                )
+            }
+            Log.d("AlarmViewModel", "Background timer scheduled for ${Date(triggerTimeMs)}")
+        } catch (e: Exception) {
+            Log.e("AlarmViewModel", "Failed to schedule background timer", e)
+        }
+    }
+
+    private fun cancelBackgroundTimer(context: Context) {
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, com.example.data.alarm.AlarmReceiver::class.java).apply {
+            action = "com.example.ACTION_TIMER_TRIGGER"
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            999111,
+            intent,
+            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+        )
+        if (pendingIntent != null) {
+            am.cancel(pendingIntent)
+            pendingIntent.cancel()
+            Log.d("AlarmViewModel", "Background timer cancelled")
+        }
+    }
+
+    fun startTimer(durationSeconds: Long) {
+        timerJob?.cancel()
+        isTimerAlarmTriggered = false
+        val context = getApplication<Application>()
+        val endTimeMs = System.currentTimeMillis() + durationSeconds * 1000L
+        
+        sharedPrefs.edit()
+            .putLong("timer_total_seconds", durationSeconds)
+            .putLong("timer_end_time_ms", endTimeMs)
+            .putLong("timer_paused_remaining_seconds", 0L)
+            .apply()
+            
+        scheduleBackgroundTimer(context, endTimeMs)
+
+        _timerTotalSeconds.value = durationSeconds
+        _timerRemainingSeconds.value = durationSeconds
+        _timerIsRunning.value = true
+        runTimerLoop()
+    }
+
+    fun pauseTimer() {
+        timerJob?.cancel()
+        val context = getApplication<Application>()
+        cancelBackgroundTimer(context)
+        
+        val remaining = _timerRemainingSeconds.value
+        sharedPrefs.edit()
+            .putLong("timer_end_time_ms", 0L)
+            .putLong("timer_paused_remaining_seconds", remaining)
+            .apply()
+
+        _timerIsRunning.value = false
+    }
+
+    fun resumeTimer() {
+        val remaining = _timerRemainingSeconds.value
+        if (remaining > 0L) {
+            timerJob?.cancel()
+            isTimerAlarmTriggered = false
+            val context = getApplication<Application>()
+            val endTimeMs = System.currentTimeMillis() + remaining * 1000L
+            
+            sharedPrefs.edit()
+                .putLong("timer_end_time_ms", endTimeMs)
+                .putLong("timer_paused_remaining_seconds", 0L)
+                .apply()
+                
+            scheduleBackgroundTimer(context, endTimeMs)
+
+            _timerIsRunning.value = true
+            runTimerLoop()
+        }
+    }
+
+    private fun ensureAlarmServicePlaying() {
+        val context = getApplication<Application>()
+        val serviceIntent = Intent(context, AlarmService::class.java).apply {
+            putExtra("ALARM_ID", -999)
+            putExtra("ALARM_TIME", "타이머")
+            putExtra("ALARM_LABEL", "설정한 타이머 시간이 완료되었습니다.")
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            Log.e("AlarmViewModel", "Failed to start AlarmService for timer", e)
+        }
+    }
+
+    fun resetTimer() {
+        timerJob?.cancel()
+        isTimerAlarmTriggered = false
+        val context = getApplication<Application>()
+        cancelBackgroundTimer(context)
+        
+        // Send dismiss action to stop the looping alarm sound and vibration in AlarmService
+        val dismissIntent = Intent(context, AlarmService::class.java).apply {
+            action = AlarmService.ACTION_DISMISS
+        }
+        try {
+            context.startService(dismissIntent)
+        } catch (e: Exception) {
+            Log.e("AlarmViewModel", "Failed to stop AlarmService on reset", e)
+        }
+        
+        sharedPrefs.edit()
+            .putLong("timer_total_seconds", 0L)
+            .putLong("timer_end_time_ms", 0L)
+            .putLong("timer_paused_remaining_seconds", 0L)
+            .apply()
+
+        _timerIsRunning.value = false
+        _timerRemainingSeconds.value = 0L
+        _timerTotalSeconds.value = 0L
+    }
+
+    private fun runTimerLoop() {
+        timerJob = viewModelScope.launch {
+            while (_timerIsRunning.value) {
+                val tEndTime = sharedPrefs.getLong("timer_end_time_ms", 0L)
+                if (tEndTime > 0L) {
+                    val now = System.currentTimeMillis()
+                    val remaining = (tEndTime - now) / 1000L
+                    _timerRemainingSeconds.value = remaining
+                    
+                    if (remaining <= 0L && !isTimerAlarmTriggered) {
+                        isTimerAlarmTriggered = true
+                        ensureAlarmServicePlaying()
+                    }
+                } else {
+                    break
+                }
+                delay(1000)
+            }
+        }
+    }
+
+    private fun triggerTimerFinishedNotification() {
+        val context = getApplication<Application>()
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "timer_channel",
+                "타이머 알림",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "타이머 완료 시 작동하는 알림 채널입니다."
+                enableVibration(true)
+                try {
+                    val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    setSound(defaultSoundUri, AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                    )
+                } catch (e: Exception) {
+                    Log.e("AlarmViewModel", "Error setting channel sound", e)
+                }
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        val notification = NotificationCompat.Builder(context, "timer_channel")
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("⏰ 타이머 종료!")
+            .setContentText("설정한 타이머 시간이 완료되었습니다.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setSound(defaultSoundUri)
+            .setVibrate(longArrayOf(0, 500, 250, 500, 250, 500))
+            .build()
+
+        notificationManager.notify(999, notification)
+
+        // Explicitly play ringtone
+        try {
+            val ringtone = RingtoneManager.getRingtone(context, defaultSoundUri)
+            ringtone?.play()
+        } catch (e: Exception) {
+            Log.e("AlarmViewModel", "Failed to play default ringtone", e)
+        }
+
+        // Explicitly vibrate
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                vibratorManager.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            }
+
+            val vibratePattern = longArrayOf(0, 500, 250, 500, 250, 500)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(android.os.VibrationEffect.createWaveform(vibratePattern, -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(vibratePattern, -1)
+            }
+        } catch (e: Exception) {
+            Log.e("AlarmViewModel", "Failed to vibrate", e)
+        }
     }
 
     // Last Sync Date State Management for Holiday Collection Records
@@ -158,6 +446,9 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
                     // Reload the saved last sync date in StateFlow
                     _lastSyncDateStr.value = sharedPrefs.getString("last_holiday_sync_date", "") ?: ""
                 }
+                "com.example.ACTION_TIMER_TRIGGER" -> {
+                    // Do nothing here, as the timer must keep running in negative territory until dismissed
+                }
             }
         }
     }
@@ -167,11 +458,31 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
             addAction("com.example.ACTION_SHOW_ALARM_SCREEN")
             addAction("com.example.ACTION_ALARM_BYPASSED")
             addAction("com.example.ACTION_AUTO_SYNC_COMPLETED")
+            addAction("com.example.ACTION_TIMER_TRIGGER")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             application.registerReceiver(appReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             application.registerReceiver(appReceiver, filter)
+        }
+
+        // Initialize Timer State from Background / SharedPreferences
+        val tTotal = sharedPrefs.getLong("timer_total_seconds", 0L)
+        val tEndTime = sharedPrefs.getLong("timer_end_time_ms", 0L)
+        val tPausedRemaining = sharedPrefs.getLong("timer_paused_remaining_seconds", 0L)
+
+        if (tEndTime > 0L) {
+            val now = System.currentTimeMillis()
+            val remaining = (tEndTime - now) / 1000L
+            _timerTotalSeconds.value = tTotal
+            _timerRemainingSeconds.value = remaining
+            _timerIsRunning.value = true
+            isTimerAlarmTriggered = remaining <= 0L
+            runTimerLoop()
+        } else if (tPausedRemaining > 0L) {
+            _timerTotalSeconds.value = tTotal
+            _timerRemainingSeconds.value = tPausedRemaining
+            _timerIsRunning.value = false
         }
 
         // Initialize local holidays so the database is populated out of the box
@@ -241,6 +552,11 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
             val result = holidayRepository.syncHolidays(year, resolvedKey, geminiKey)
             when (result) {
                 is SyncResult.Success -> {
+                    sharedPrefs.edit()
+                        .putBoolean("holiday_sync_success", true)
+                        .putString("holiday_sync_source", result.source)
+                        .putInt("holiday_sync_count", result.holidaysCount)
+                        .apply()
                     _syncState.value = SyncState.Success(result.source, result.holidaysCount)
                     updateLastSyncDate(System.currentTimeMillis())
                 }
@@ -356,6 +672,11 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             val repeatStr = repeatDays.sorted().joinToString(",")
+            
+            val currentList = alarms.value
+            val existingAlarm = if (id != 0) currentList.find { it.id == id } else null
+            val orderToUse = existingAlarm?.customOrder ?: (currentList.minOfOrNull { it.customOrder }?.minus(1) ?: 0)
+
             val alarm = Alarm(
                 id = if (id == 0) 0 else id,
                 hour = hour,
@@ -372,7 +693,8 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
                 snoozeRepeats = snoozeRepeats,
                 remainingSnoozes = 0,
                 preReminderEnabled = preReminderEnabled,
-                preReminderMinutes = preReminderMinutes
+                preReminderMinutes = preReminderMinutes,
+                customOrder = orderToUse
             )
 
             if (id == 0) {
@@ -398,6 +720,21 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
     fun updateAlarmsOrder(alarms: List<Alarm>) {
         viewModelScope.launch {
             alarms.forEachIndexed { index, alarm ->
+                if (alarm.customOrder != index) {
+                    alarmRepository.updateAlarm(alarm.copy(customOrder = index))
+                }
+            }
+            sharedPrefs.edit().putBoolean("use_custom_order", true).apply()
+            _useCustomOrder.value = true
+        }
+    }
+
+    fun resetAlarmsOrder() {
+        viewModelScope.launch {
+            sharedPrefs.edit().putBoolean("use_custom_order", false).apply()
+            _useCustomOrder.value = false
+            val sortedAlarms = alarms.value.sortedWith(compareBy({ it.hour }, { it.minute }))
+            sortedAlarms.forEachIndexed { index, alarm ->
                 if (alarm.customOrder != index) {
                     alarmRepository.updateAlarm(alarm.copy(customOrder = index))
                 }
