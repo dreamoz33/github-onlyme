@@ -35,6 +35,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusRequester
 import kotlinx.coroutines.launch
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -3085,16 +3086,35 @@ fun AlarmEditDialog(
     var selectedHour by remember { mutableIntStateOf(alarm.hour) }
     var selectedMinute by remember { mutableIntStateOf(alarm.minute) }
     
+    // Default to drag/scroll mode (isEditingHour = false, isEditingMinute = false)
     var isEditingHour by remember { mutableStateOf(false) }
     var isEditingMinute by remember { mutableStateOf(false) }
     var hourInputText by remember { mutableStateOf(String.format(Locale.KOREAN, "%02d", alarm.hour)) }
     var minuteInputText by remember { mutableStateOf(String.format(Locale.KOREAN, "%02d", alarm.minute)) }
 
     androidx.compose.runtime.LaunchedEffect(selectedHour) {
-        hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
+        if (!isEditingHour) {
+            hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
+        }
     }
     androidx.compose.runtime.LaunchedEffect(selectedMinute) {
-        minuteInputText = String.format(Locale.KOREAN, "%02d", selectedMinute)
+        if (!isEditingMinute) {
+            minuteInputText = String.format(Locale.KOREAN, "%02d", selectedMinute)
+        }
+    }
+
+    val hourFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    val minuteFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+    androidx.compose.runtime.LaunchedEffect(isEditingHour) {
+        if (isEditingHour) {
+            hourFocusRequester.requestFocus()
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(isEditingMinute) {
+        if (isEditingMinute) {
+            minuteFocusRequester.requestFocus()
+        }
     }
 
     var labelInput by remember { mutableStateOf(alarm.label) }
@@ -3157,11 +3177,18 @@ fun AlarmEditDialog(
                     .fillMaxWidth()
                     .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
             ) {
+                val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(20.dp)
                         .verticalScroll(rememberScrollState())
+                        .clickable(
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            focusManager.clearFocus()
+                        }
                 ) {
                 Text(
                     text = if (alarm.id == 0) "새 알람 만들기" else "알람 설정 편집",
@@ -3189,59 +3216,39 @@ fun AlarmEditDialog(
                             Text("시간", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                             Spacer(modifier = Modifier.height(4.dp))
                             
-                            if (isEditingHour) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(75.dp)
-                                        .height(140.dp)
-                                        .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f), RoundedCornerShape(12.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    androidx.compose.foundation.text.BasicTextField(
-                                        value = hourInputText,
-                                        onValueChange = { newVal ->
-                                            val filtered = newVal.filter { it.isDigit() }.take(2)
-                                            hourInputText = filtered
-                                            val parsed = filtered.toIntOrNull()
-                                            if (parsed != null && parsed in 0..23) {
-                                                selectedHour = parsed
-                                            }
-                                        },
-                                        keyboardOptions = KeyboardOptions(
-                                            keyboardType = KeyboardType.Number,
-                                            imeAction = ImeAction.Done
-                                        ),
-                                        keyboardActions = KeyboardActions(
-                                            onDone = {
-                                                if (hourInputText.isEmpty()) {
-                                                    hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
-                                                } else {
-                                                    selectedHour = hourInputText.toIntOrNull()?.coerceIn(0, 23) ?: selectedHour
-                                                    hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
-                                                }
-                                                isEditingHour = false
-                                                isEditingMinute = false
-                                            }
-                                        ),
-                                        textStyle = MaterialTheme.typography.headlineLarge.copy(
-                                            fontSize = 32.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                        ),
-                                        modifier = Modifier.fillMaxWidth().testTag("hour_text_input")
-                                    )
+                            WheelPicker(
+                                selectedValue = selectedHour,
+                                range = (0..23).toList(),
+                                onValueChange = { selectedHour = it },
+                                modifier = Modifier.testTag("hour_wheel_picker"),
+                                buttonPosition = "LEFT",
+                                isEditing = isEditingHour,
+                                inputText = hourInputText,
+                                onInputTextChange = { newVal ->
+                                    val filtered = newVal.filter { it.isDigit() }.take(2)
+                                    hourInputText = filtered
+                                    if (filtered.length == 2) {
+                                        val parsed = filtered.toIntOrNull()
+                                        if (parsed != null && parsed in 0..23) {
+                                            selectedHour = parsed
+                                            isEditingHour = false
+                                        }
+                                    }
+                                },
+                                focusRequester = hourFocusRequester,
+                                onDone = {
+                                    val parsed = hourInputText.toIntOrNull()
+                                    if (parsed != null && parsed in 0..23) {
+                                        selectedHour = parsed
+                                    }
+                                    hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
+                                    isEditingHour = false
+                                },
+                                onCenterClick = {
+                                    hourInputText = ""
+                                    isEditingHour = true
                                 }
-                            } else {
-                                WheelPicker(
-                                    selectedValue = selectedHour,
-                                    range = (0..23).toList(),
-                                    onValueChange = { selectedHour = it },
-                                    modifier = Modifier.testTag("hour_wheel_picker"),
-                                    buttonPosition = "LEFT"
-                                )
-                            }
+                            )
                         }
                         
                         Spacer(modifier = Modifier.width(6.dp))
@@ -3257,92 +3264,38 @@ fun AlarmEditDialog(
                             Text("분", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                             Spacer(modifier = Modifier.height(4.dp))
                             
-                            if (isEditingMinute) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(75.dp)
-                                        .height(140.dp)
-                                        .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f), RoundedCornerShape(12.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    androidx.compose.foundation.text.BasicTextField(
-                                        value = minuteInputText,
-                                        onValueChange = { newVal ->
-                                            val filtered = newVal.filter { it.isDigit() }.take(2)
-                                            minuteInputText = filtered
-                                            val parsed = filtered.toIntOrNull()
-                                            if (parsed != null && parsed in 0..59) {
-                                                selectedMinute = parsed
-                                            }
-                                        },
-                                        keyboardOptions = KeyboardOptions(
-                                            keyboardType = KeyboardType.Number,
-                                            imeAction = ImeAction.Done
-                                        ),
-                                        keyboardActions = KeyboardActions(
-                                            onDone = {
-                                                if (minuteInputText.isEmpty()) {
-                                                    minuteInputText = String.format(Locale.KOREAN, "%02d", selectedMinute)
-                                                } else {
-                                                    selectedMinute = minuteInputText.toIntOrNull()?.coerceIn(0, 59) ?: selectedMinute
-                                                    minuteInputText = String.format(Locale.KOREAN, "%02d", selectedMinute)
-                                                }
-                                                isEditingHour = false
-                                                isEditingMinute = false
-                                            }
-                                        ),
-                                        textStyle = MaterialTheme.typography.headlineLarge.copy(
-                                            fontSize = 32.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                        ),
-                                        modifier = Modifier.fillMaxWidth().testTag("minute_text_input")
-                                    )
-                                }
-                            } else {
-                                WheelPicker(
-                                    selectedValue = selectedMinute,
-                                    range = (0..59).toList(),
-                                    onValueChange = { selectedMinute = it },
-                                    modifier = Modifier.testTag("minute_wheel_picker"),
-                                    buttonPosition = "RIGHT"
-                                )
-                            }
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(10.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        TextButton(
-                            onClick = {
-                                if (!isEditingHour && !isEditingMinute) {
-                                    hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
+                            WheelPicker(
+                                selectedValue = selectedMinute,
+                                range = (0..59).toList(),
+                                onValueChange = { selectedMinute = it },
+                                modifier = Modifier.testTag("minute_wheel_picker"),
+                                buttonPosition = "RIGHT",
+                                isEditing = isEditingMinute,
+                                inputText = minuteInputText,
+                                onInputTextChange = { newVal ->
+                                    val filtered = newVal.filter { it.isDigit() }.take(2)
+                                    minuteInputText = filtered
+                                    if (filtered.length == 2) {
+                                        val parsed = filtered.toIntOrNull()
+                                        if (parsed != null && parsed in 0..59) {
+                                            selectedMinute = parsed
+                                            isEditingMinute = false
+                                        }
+                                    }
+                                },
+                                focusRequester = minuteFocusRequester,
+                                onDone = {
+                                    val parsed = minuteInputText.toIntOrNull()
+                                    if (parsed != null && parsed in 0..59) {
+                                        selectedMinute = parsed
+                                    }
                                     minuteInputText = String.format(Locale.KOREAN, "%02d", selectedMinute)
-                                    isEditingHour = true
-                                    isEditingMinute = true
-                                } else {
-                                    isEditingHour = false
                                     isEditingMinute = false
+                                },
+                                onCenterClick = {
+                                    minuteInputText = ""
+                                    isEditingMinute = true
                                 }
-                            },
-                            modifier = Modifier.testTag("toggle_input_mode_button")
-                        ) {
-                            Icon(
-                                imageVector = if (isEditingHour) Icons.Default.Check else Icons.Default.Edit,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                if (isEditingHour) "드래그(스크롤) 선택 모드로 변경" else "숫자 키패드로 직접 입력하기",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
@@ -3350,7 +3303,7 @@ fun AlarmEditDialog(
  
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "💡 숫자 열을 위아래로 드래그하여 시·분을 맞추거나, 직접 입력 모드를 켜서 입력할 수 있습니다.",
+                    text = "💡 시·분 숫자 칸을 터치하여 숫자를 직접 입력하거나, 위아래로 끌어 당겨서 맞출 수 있습니다.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f),
                     modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -3944,9 +3897,12 @@ fun AlarmEditDialog(
                     Spacer(modifier = Modifier.width(12.dp))
                     Button(
                         onClick = {
+                            // Ensure any typed inputs in raw text are parsed and validated upon clicking save 
+                            val finalHour = hourInputText.toIntOrNull()?.coerceIn(0, 23) ?: selectedHour
+                            val finalMinute = minuteInputText.toIntOrNull()?.coerceIn(0, 59) ?: selectedMinute
                             onSave(
-                                selectedHour,
-                                selectedMinute,
+                                finalHour,
+                                finalMinute,
                                 labelInput,
                                 isEnabled,
                                 selectedDays,
@@ -4486,7 +4442,13 @@ fun WheelPicker(
     itemWidth: androidx.compose.ui.unit.Dp = 75.dp,
     formatter: (Int) -> String = { String.format(Locale.KOREAN, "%02d", it) },
     buttonsVertical: Boolean = false,
-    buttonPosition: String = "NONE" // "LEFT", "RIGHT", "TOP_BOTTOM", "NONE"
+    buttonPosition: String = "NONE", // "LEFT", "RIGHT", "TOP_BOTTOM", "NONE"
+    onCenterClick: (() -> Unit)? = null,
+    isEditing: Boolean = false,
+    inputText: String = "",
+    onInputTextChange: (String) -> Unit = {},
+    focusRequester: androidx.compose.ui.focus.FocusRequester? = null,
+    onDone: (() -> Unit)? = null
 ) {
     val lazyListState = androidx.compose.foundation.lazy.rememberLazyListState(
         initialFirstVisibleItemIndex = range.indexOf(selectedValue).coerceAtLeast(0)
@@ -4583,13 +4545,15 @@ fun WheelPicker(
                     .height(44.dp)
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
                     .border(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                    .clickable(enabled = onCenterClick != null && !isEditing) { onCenterClick?.invoke() }
             )
 
             androidx.compose.foundation.lazy.LazyColumn(
                 state = lazyListState,
                 contentPadding = PaddingValues(vertical = 43.dp), // exact mathematically computed alignment padding
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                userScrollEnabled = !isEditing
             ) {
                 items(range.size) { idx ->
                     val valNum = range[idx]
@@ -4598,24 +4562,65 @@ fun WheelPicker(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(44.dp)
-                            .clickable { onValueChange(valNum) },
+                            .clickable {
+                                if (isSelected) {
+                                    if (!isEditing && onCenterClick != null) {
+                                        onCenterClick.invoke()
+                                    }
+                                } else {
+                                    if (!isEditing) {
+                                        onValueChange(valNum)
+                                    }
+                                }
+                            },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = formatter(valNum),
-                            style = if (isSelected) {
-                                MaterialTheme.typography.titleLarge.copy(
+                        if (isSelected && isEditing) {
+                            var hasBeenFocused by remember { mutableStateOf(false) }
+                            androidx.compose.foundation.text.BasicTextField(
+                                value = inputText,
+                                onValueChange = onInputTextChange,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number,
+                                    imeAction = ImeAction.Done
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onDone = { onDone?.invoke() }
+                                ),
+                                textStyle = MaterialTheme.typography.titleLarge.copy(
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary,
-                                    fontSize = 24.sp
-                                )
-                            } else {
-                                MaterialTheme.typography.bodyMedium.copy(
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.52f) // Increased contrast!
-                                )
-                            },
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
+                                    fontSize = 24.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+                                    .onFocusChanged { focusState ->
+                                        if (focusState.isFocused) {
+                                            hasBeenFocused = true
+                                        } else if (hasBeenFocused) {
+                                            onDone?.invoke()
+                                        }
+                                    }
+                            )
+                        } else {
+                            Text(
+                                text = formatter(valNum),
+                                style = if (isSelected) {
+                                    MaterialTheme.typography.titleLarge.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 24.sp
+                                    )
+                                } else {
+                                    MaterialTheme.typography.bodyMedium.copy(
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.52f) // Increased contrast!
+                                    )
+                                },
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
                     }
                 }
             }
