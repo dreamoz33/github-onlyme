@@ -621,45 +621,11 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
         _activeRingingAlarm.value = null
         val context = getApplication<Application>()
         val serviceIntent = Intent(context, AlarmService::class.java).apply {
-            action = AlarmService.ACTION_DISMISS
+            action = AlarmService.ACTION_SNOOZE
+            putExtra("ALARM_ID", active.id)
+            putExtra("SNOOZE_INTERVAL", customInterval ?: if (active.snoozeEnabled) active.snoozeInterval else 5)
         }
         context.startService(serviceIntent)
-
-        viewModelScope.launch {
-            val alarm = alarmRepository.getAlarmById(active.id)
-            if (alarm != null) {
-                val intervalToUse = customInterval ?: if (alarm.snoozeEnabled) alarm.snoozeInterval else 5
-                
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
-                    android.widget.Toast.makeText(context, "${intervalToUse}분 후 다시 울립니다.", android.widget.Toast.LENGTH_SHORT).show()
-                }
-
-                if (alarm.snoozeEnabled) {
-                    val currentRem = alarm.remainingSnoozes
-                    if (currentRem > 0) {
-                        val nextRem = currentRem - 1
-                        val updatedAlarm = alarm.copy(remainingSnoozes = nextRem)
-                        alarmRepository.updateAlarm(updatedAlarm)
-
-                        val scheduler = AlarmScheduler(context)
-                        scheduler.scheduleSnooze(alarm.id, intervalToUse)
-
-                        Log.d("AlarmViewModel", "Alarm ${alarm.id} snoozed. Remaining repeats: $nextRem")
-                        addBypassLog(alarm.label, "다시 울림 등록 (${intervalToUse}분 뒤 울림, 남은 횟수: ${nextRem}회)")
-                    } else {
-                        // Remaining repeats exhausted, but side keys override it and force snooze
-                        val scheduler = AlarmScheduler(context)
-                        scheduler.scheduleSnooze(alarm.id, intervalToUse)
-                        addBypassLog(alarm.label, "다시 울림 강제 등록 (횟수 초과 상태, ${intervalToUse}분 뒤 울림)")
-                    }
-                } else {
-                    // Snooze disabled in settings, but side keys override with the interval
-                    val scheduler = AlarmScheduler(context)
-                    scheduler.scheduleSnooze(alarm.id, intervalToUse)
-                    addBypassLog(alarm.label, "다시 울림 강제 등록 (설정 미사용 상태, ${intervalToUse}분 뒤 울림)")
-                }
-            }
-        }
     }
 
     fun saveAlarm(

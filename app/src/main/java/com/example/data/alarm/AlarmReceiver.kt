@@ -197,7 +197,7 @@ class AlarmReceiver : BroadcastReceiver() {
         val alarmRepository = AlarmRepository(alarmDao, context)
 
         val alarm = alarmDao.getAlarmById(alarmId) ?: return
-        if (!alarm.isEnabled) return
+        if (!alarm.isEnabled && !isSnoozeTrigger) return
 
         var shouldTrigger = true
         var isTodayHoliday = false

@@ -27,11 +27,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
+import java.util.Calendar
+import java.util.Date
+import java.text.SimpleDateFormat
 
 class AlarmService : Service() {
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var currentAlarmId: Int = -1
+    private var screenOffReceiver: android.content.BroadcastReceiver? = null
 
     companion object {
         const val CHANNEL_ID = "ALARM_FOREGROUND_SERVICE_CHANNEL_V7"
@@ -52,6 +56,13 @@ class AlarmService : Service() {
         if (action == ACTION_DISMISS) {
             val alarmId = intent?.getIntExtra("ALARM_ID", -1) ?: currentAlarmId
             if (alarmId != -1) {
+                try {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(alarmId + 200000)
+                } catch (e: Exception) {
+                    Log.e("AlarmService", "Failed to cancel snooze notification", e)
+                }
+
                 val context = this
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
@@ -87,12 +98,20 @@ class AlarmService : Service() {
         }
 
         if (action == ACTION_SNOOZE) {
-            triggerSnooze()
+            val snoozeInterval = intent?.getIntExtra("SNOOZE_INTERVAL", 5) ?: 5
+            triggerSnooze(snoozeInterval)
             return START_NOT_STICKY
         }
 
         val alarmId = intent?.getIntExtra("ALARM_ID", -1) ?: -1
         currentAlarmId = alarmId
+
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(alarmId + 200000)
+        } catch (e: Exception) {
+            Log.e("AlarmService", "Failed to cancel snooze notification on ringing start", e)
+        }
         
         val label = intent?.getStringExtra("ALARM_LABEL") ?: "알람"
         val timeStr = intent?.getStringExtra("ALARM_TIME") ?: "--:--"
@@ -144,6 +163,7 @@ class AlarmService : Service() {
         
         playAlarmSound(customToneUriStr)
         startVibrator()
+        registerScreenOffReceiver()
 
         return START_STICKY
     }
@@ -397,8 +417,8 @@ class AlarmService : Service() {
         return builder.build()
     }
 
-    private fun triggerSnooze() {
-        Log.d("AlarmService", "Wearable/media button clicked: triggering 5-minute snooze")
+    private fun triggerSnooze(intervalMinutes: Int = 5) {
+        Log.d("AlarmService", "triggerSnooze clicked: triggering ${intervalMinutes}-minute snooze")
         val alarmId = currentAlarmId
         if (alarmId == -1 || alarmId == -999) {
             stopAlarm()
@@ -417,12 +437,19 @@ class AlarmService : Service() {
                 val alarmRepository = AlarmRepository(alarmDao, context)
                 val alarm = alarmDao.getAlarmById(alarmId)
                 if (alarm != null) {
-                    val intervalToUse = 5 // "기본 5분 스누즈가 동작하게 해줘"
+                    val intervalToUse = intervalMinutes
                     
+                    val calendar = Calendar.getInstance().apply {
+                        add(Calendar.MINUTE, intervalToUse)
+                    }
+                    val sdf12 = SimpleDateFormat("a h:mm", Locale.KOREAN)
+                    val formattedTime = sdf12.format(calendar.time)
+                    val textMsg = "${intervalToUse}분 후 ($formattedTime)에 다시 울립니다."
+
                     CoroutineScope(Dispatchers.Main).launch {
                         android.widget.Toast.makeText(
                             context,
-                            "5분 후 다시 울립니다.",
+                            textMsg,
                             android.widget.Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -446,6 +473,9 @@ class AlarmService : Service() {
                         scheduler.scheduleSnooze(alarm.id, intervalToUse)
                     }
 
+                    // Post beautiful system notification for the current snooze
+                    postSnoozeNotification(alarm.id, alarm.label, intervalToUse, formattedTime)
+
                     // Send local broadcast to dismiss overlays
                     val dismissOverlayIntent = Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
                         putExtra("ALARM_ID", alarmId)
@@ -459,9 +489,96 @@ class AlarmService : Service() {
         }
     }
 
+    private fun postSnoozeNotification(alarmId: Int, label: String, intervalMinutes: Int, formattedTime: String) {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        
+        // Ensure channel is created
+        val channelId = "ALARM_SNOOZE_NOTIFICATION_CHANNEL"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "알람 스누즈 알림",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "알람이 스누즈되어 대기 중일 때 표시되는 알림"
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // Action Intent for Dismiss Snooze from the notification
+        val dismissIntent = Intent(this, AlarmService::class.java).apply {
+            action = ACTION_DISMISS
+            putExtra("ALARM_ID", alarmId)
+        }
+        val dismissPendingIntent = PendingIntent.getService(
+            this,
+            alarmId + 1100000,
+            dismissIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val mainActivityIntent = Intent(this, com.example.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            this,
+            alarmId + 1200000,
+            mainActivityIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val displayLabel = if (label.isNotBlank()) label else "알람"
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("$displayLabel 다시 울림 대기 중")
+            .setContentText("${intervalMinutes}분 후 ($formattedTime)에 다시 울립니다.")
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(contentPendingIntent)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "해제",
+                dismissPendingIntent
+            )
+            .build()
+
+        notificationManager.notify(alarmId + 200000, notification)
+        Log.d("AlarmService", "Snooze notification posted for alarm $alarmId, target time: $formattedTime")
+    }
+
     private fun stopAlarm() {
         stopAudio()
         stopVibrator()
+        unregisterScreenOffReceiver()
+    }
+
+    private fun registerScreenOffReceiver() {
+        if (screenOffReceiver == null) {
+            screenOffReceiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                        Log.d("AlarmService", "Screen turned off (Power Button pressed): snoozing alarm")
+                        triggerSnooze()
+                    }
+                }
+            }
+            val filter = android.content.IntentFilter(Intent.ACTION_SCREEN_OFF)
+            registerReceiver(screenOffReceiver, filter)
+        }
+    }
+
+    private fun unregisterScreenOffReceiver() {
+        screenOffReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: Exception) {
+                Log.e("AlarmService", "Failed to unregister screenOffReceiver", e)
+            }
+            screenOffReceiver = null
+        }
     }
 
     private fun stopAudio() {
