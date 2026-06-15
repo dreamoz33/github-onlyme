@@ -241,8 +241,8 @@ class AlarmReceiver : BroadcastReceiver() {
                 context.startService(serviceIntent)
             }
 
-            // Directly start MainActivity in full screen mode, whether app is in background or closed
-            val mainActivityIntent = Intent(context, com.example.MainActivity::class.java).apply {
+            // Directly start AlarmAlertActivity in full screen mode, whether app is in background or closed
+            val alertIntent = Intent(context, com.example.AlarmAlertActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra("ALARM_ID", alarm.id)
                 putExtra("ALARM_LABEL", labelToUse)
@@ -250,9 +250,9 @@ class AlarmReceiver : BroadcastReceiver() {
                 putExtra("CUSTOM_TONE_URI", alarm.customToneUri)
             }
             try {
-                context.startActivity(mainActivityIntent)
+                context.startActivity(alertIntent)
             } catch (e: Exception) {
-                Log.e("AlarmReceiver", "Failed to directly launch MainActivity", e)
+                Log.e("AlarmReceiver", "Failed to directly launch AlarmAlertActivity", e)
             }
 
             // If a fresh trigger of a snooze-enabled alarm, initialize remaining snooze count in database

@@ -3,6 +3,7 @@ package com.example
 import kotlin.math.roundToInt
 
 import android.content.Context
+import android.content.Intent
 import android.content.ClipboardManager
 import android.content.ClipData
 import android.net.Uri
@@ -134,6 +135,10 @@ class MainActivity : ComponentActivity() {
         if (viewModel.activeRingingAlarm.value != null) {
             // Volume keys, Back key, and other physical key downs during ringing trigger a 5-minute snooze
             viewModel.snoozeRinging(5)
+            val dismissOverlayIntent = android.content.Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
+                setPackage(packageName)
+            }
+            sendBroadcast(dismissOverlayIntent)
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -164,6 +169,8 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
     var showSettingsDialog by remember { mutableStateOf(false) }
 
     // Request poster permissions on Android 13+
+    var showOverlayPermissionDialog by remember { mutableStateOf(false) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ -> }
@@ -171,6 +178,12 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!android.provider.Settings.canDrawOverlays(context)) {
+                kotlinx.coroutines.delay(1200)
+                showOverlayPermissionDialog = true
+            }
         }
     }
 
@@ -334,6 +347,53 @@ fun MainAppScreen(viewModel: AlarmViewModel) {
             SettingsDialog(
                 onDismiss = { showSettingsDialog = false },
                 viewModel = viewModel
+            )
+        }
+
+        if (showOverlayPermissionDialog) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showOverlayPermissionDialog = false },
+                title = {
+                    Text(
+                        text = "알람 환경 최적화 설정",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Text(
+                        text = "화면이 잠겨 있거나 다른 앱을 사용하는 중에도 독립형 알람 해제 화면이 즉시 표시되도록 하려면 '다른 앱 위에 표시(Overlay)' 권한 허용이 필요합니다. 설정으로 이동하셔서 권한을 켜주세요.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            showOverlayPermissionDialog = false
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                try {
+                                    val intent = Intent(
+                                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        android.net.Uri.parse("package:${context.packageName}")
+                                    )
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                                    context.startActivity(intent)
+                                }
+                            }
+                        }
+                    ) {
+                        Text("설정으로 이동")
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showOverlayPermissionDialog = false }
+                    ) {
+                        Text("나중에 설정")
+                    }
+                }
             )
         }
 
@@ -3925,8 +3985,8 @@ fun AlarmEditDialog(
                 }
             }
         }
-        }
     }
+}
 }
 
 // Fullscreen Alarm Trigger Overlay
@@ -4076,47 +4136,58 @@ fun ActiveAlarmOverlay(
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                // Big Guide track ring background (Translucent gray zone)
+                // Outer Static Dismiss Boundary Circle representing the "해제 가능 영역"
+                // Size matches the threshold (145.dp radius = 290.dp diameter)
                 Box(
                     modifier = Modifier
-                        .size(175.dp * pulseScale)
+                        .size(290.dp)
                         .background(
-                            color = Color(0xFF1E1E21).copy(alpha = 0.5f + (0.3f * dragFraction)),
+                            color = if (dragFraction >= 1f) Color(0x33FF453A) else Color.Transparent, // visual red warning glow when dragging fully reaches target
                             shape = CircleShape
                         )
                         .border(
-                            width = 1.dp,
-                            color = Color.White.copy(alpha = 0.12f + (0.28f * dragFraction)),
+                            width = 2.dp,
+                            color = if (dragFraction >= 1f) Color(0xFFFF453A) else Color.White.copy(alpha = 0.25f),
                             shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (dragFraction < 1f) {
+                        // Guide label showing inside the target boundary circle
+                        Text(
+                            text = "해제 영역",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            ),
+                            color = Color.White.copy(alpha = 0.15f),
+                            modifier = Modifier.padding(bottom = 120.dp)
                         )
-                )
+                    }
+                }
 
-                // Handle is dragged but central connecting trace line is removed for a cleaner look as requested
-
-
-                // Swipable Alarm Central Handle with white X interior
-                val dragTranslationX = dragX.value
-                val dragTranslationY = dragY.value
+                val concentricSize = 105.dp + (185.dp * dragFraction)
                 val densityCoeff = with(density) { 1.dp.toPx() }
 
+                // The central circle stays centered (no position offset is applied), 
+                // expanding outward in size dynamically as the user drags!
                 Box(
                     modifier = Modifier
-                        .offset(
-                            x = with(density) { dragTranslationX.toDp() },
-                            y = with(density) { dragTranslationY.toDp() }
-                        )
                         .graphicsLayer {
                             // Ringing vibration applied entirely via RenderThread when NOT dragged
                             rotationZ = if (isDragging) 0f else shakeRotation
                             translationX = if (isDragging) 0f else (shakeTranslationX * densityCoeff)
                             translationY = if (isDragging) 0f else (shakeTranslationY * densityCoeff)
                         }
-                        .size(105.dp)
+                        .size(concentricSize)
                         .clip(CircleShape)
-                        .background(Color(0xFF2C2C2E)) // Premium gray handle background
+                        .background(
+                            color = if (dragFraction >= 1f) Color(0xFFFF453A) else Color(0xFF2C2C2E).copy(alpha = 1f - 0.4f * dragFraction)
+                        )
                         .border(
-                            width = 1.5.dp,
-                            color = Color.White.copy(alpha = 0.85f),
+                            width = (1.5.dp + 1.5.dp * dragFraction),
+                            color = if (dragFraction >= 1f) Color(0xFFFF453A) else Color.White.copy(alpha = 0.85f),
                             shape = CircleShape
                         )
                         .pointerInput(Unit) {
@@ -4157,11 +4228,7 @@ fun ActiveAlarmOverlay(
                                         dragX.snapTo(nextX)
                                         dragY.snapTo(nextY)
 
-                                        val currentDist = kotlin.math.sqrt(nextX * nextX + nextY * nextY)
-                                        if (currentDist >= thresholdPx && !isDismissed) {
-                                            isDismissed = true
-                                            onDismiss()
-                                        }
+                                        // Do NOT dismiss during drag immediately. Dismiss ONLY on release (onDragEnd)!
                                     }
                                 }
                             )
@@ -4173,7 +4240,7 @@ fun ActiveAlarmOverlay(
                         imageVector = Icons.Default.Close,
                         contentDescription = "알람 해제",
                         tint = Color.White,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(34.dp + (14.dp * dragFraction))
                     )
                 }
             }
@@ -4576,7 +4643,7 @@ fun WheelPicker(
                         contentAlignment = Alignment.Center
                     ) {
                         if (isSelected && isEditing) {
-                            var hasBeenFocused by remember { mutableStateOf(false) }
+                            var hasBeenFocused by remember(isEditing) { mutableStateOf(false) }
                             androidx.compose.foundation.text.BasicTextField(
                                 value = inputText,
                                 onValueChange = onInputTextChange,

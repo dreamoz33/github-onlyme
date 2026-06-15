@@ -436,6 +436,9 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
+                "com.example.ACTION_DISMISS_ALARM_RINGING" -> {
+                    _activeRingingAlarm.value = null
+                }
                 "com.example.ACTION_ALARM_BYPASSED" -> {
                     val label = intent.getStringExtra("ALARM_LABEL") ?: "알람"
                     val reason = intent.getStringExtra("BYPASS_REASON") ?: "공휴일 제외"
@@ -456,6 +459,7 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
     init {
         val filter = IntentFilter().apply {
             addAction("com.example.ACTION_SHOW_ALARM_SCREEN")
+            addAction("com.example.ACTION_DISMISS_ALARM_RINGING")
             addAction("com.example.ACTION_ALARM_BYPASSED")
             addAction("com.example.ACTION_AUTO_SYNC_COMPLETED")
             addAction("com.example.ACTION_TIMER_TRIGGER")
@@ -625,6 +629,11 @@ class AlarmViewModel(application: Application) : AndroidViewModel(application) {
             val alarm = alarmRepository.getAlarmById(active.id)
             if (alarm != null) {
                 val intervalToUse = customInterval ?: if (alarm.snoozeEnabled) alarm.snoozeInterval else 5
+                
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                    android.widget.Toast.makeText(context, "${intervalToUse}분 후 다시 울립니다.", android.widget.Toast.LENGTH_SHORT).show()
+                }
+
                 if (alarm.snoozeEnabled) {
                     val currentRem = alarm.remainingSnoozes
                     if (currentRem > 0) {
