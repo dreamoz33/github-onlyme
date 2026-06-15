@@ -31,11 +31,10 @@ import java.util.Locale
 class AlarmService : Service() {
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
-    private var mediaSession: MediaSession? = null
     private var currentAlarmId: Int = -1
 
     companion object {
-        const val CHANNEL_ID = "ALARM_FOREGROUND_SERVICE_CHANNEL"
+        const val CHANNEL_ID = "ALARM_FOREGROUND_SERVICE_CHANNEL_V7"
         const val NOTIFICATION_ID = 9999
         const val ACTION_DISMISS = "com.example.ACTION_DISMISS_ALARM"
         const val ACTION_SNOOZE = "com.example.ACTION_SNOOZE_ALARM"
@@ -51,6 +50,37 @@ class AlarmService : Service() {
         Log.d("AlarmService", "onStartCommand action: $action")
 
         if (action == ACTION_DISMISS) {
+            val alarmId = intent?.getIntExtra("ALARM_ID", -1) ?: currentAlarmId
+            if (alarmId != -1) {
+                val context = this
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val database = AppDatabase.getDatabase(context)
+                        val alarmDao = database.alarmDao()
+                        val alarmRepository = AlarmRepository(alarmDao, context)
+                        val alarm = alarmDao.getAlarmById(alarmId)
+                        if (alarm != null) {
+                            val updatedAlarm = alarm.copy(remainingSnoozes = 0)
+                            alarmRepository.updateAlarm(updatedAlarm)
+                            
+                            val scheduler = AlarmScheduler(context)
+                            scheduler.cancelSnooze(alarm.id)
+                        }
+                    } catch (e: Exception) {
+                        Log.e("AlarmService", "Failed to clear snooze on action_dismiss", e)
+                    }
+                }
+            }
+
+            // Send local broadcast to clear activeRingingAlarm State in AlarmViewModel and dismiss AlarmAlertActivity
+            val dismissOverlayIntent = Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
+                if (alarmId != -1) {
+                    putExtra("ALARM_ID", alarmId)
+                }
+                setPackage(packageName)
+            }
+            sendBroadcast(dismissOverlayIntent)
+
             stopAlarm()
             stopSelf()
             return START_NOT_STICKY
@@ -68,9 +98,36 @@ class AlarmService : Service() {
         val timeStr = intent?.getStringExtra("ALARM_TIME") ?: "--:--"
         val customToneUriStr = intent?.getStringExtra("CUSTOM_TONE_URI")
 
-        startForeground(NOTIFICATION_ID, buildNotification(alarmId, label, timeStr, customToneUriStr))
+        // Acquire a temporary wake lock to turn on screen and bypass CPU/display sleep (crucial for Wear OS / Galaxy Watch / Locked phones)
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            @Suppress("DEPRECATION")
+            val wakeLock = powerManager.newWakeLock(
+                android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                android.os.PowerManager.ON_AFTER_RELEASE,
+                "CosmicAlarm:WakeLock"
+            )
+            wakeLock.acquire(10000) // 10 seconds is plenty to light up the display and launch Activity
+        } catch (e: Exception) {
+            Log.e("AlarmService", "Failed to acquire wake lock for screen turn-on", e)
+        }
+
+        // On Android 14+ (API level 34+), starting a foreground service of mediaPlayback requires passing the service type
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(alarmId, label, timeStr, customToneUriStr),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } else {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(alarmId, label, timeStr, customToneUriStr)
+            )
+        }
         
-        // Launch AlarmAlertActivity directly from service to guarantee immediate pop-up
+        // Guarantee immediate launch of AlarmAlertActivity on all screens (unlocked, locked, and Galaxy Watch Wear OS)
         val alertIntent = Intent(this, AlarmAlertActivity::class.java).apply {
             setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("ALARM_ID", alarmId)
@@ -80,13 +137,13 @@ class AlarmService : Service() {
         }
         try {
             startActivity(alertIntent)
+            Log.d("AlarmService", "Explicitly triggered AlarmAlertActivity startup successfully")
         } catch (e: Exception) {
-            Log.e("AlarmService", "Failed to directly launch AlarmAlertActivity from AlarmService", e)
+            Log.e("AlarmService", "Failed to launch AlarmAlertActivity directly from AlarmService", e)
         }
         
         playAlarmSound(customToneUriStr)
         startVibrator()
-        setupMediaSession()
 
         return START_STICKY
     }
@@ -138,7 +195,7 @@ class AlarmService : Service() {
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .build()
                 )
                 isLooping = true
@@ -156,7 +213,7 @@ class AlarmService : Service() {
                         setAudioAttributes(
                             AudioAttributes.Builder()
                                 .setUsage(AudioAttributes.USAGE_ALARM)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                                 .build()
                         )
                         isLooping = true
@@ -176,7 +233,7 @@ class AlarmService : Service() {
                         setAudioAttributes(
                             AudioAttributes.Builder()
                                 .setUsage(AudioAttributes.USAGE_ALARM)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                                 .build()
                         )
                         isLooping = true
@@ -198,7 +255,7 @@ class AlarmService : Service() {
                         setAudioAttributes(
                             AudioAttributes.Builder()
                                 .setUsage(AudioAttributes.USAGE_ALARM)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                                 .build()
                         )
                         isLooping = true
@@ -235,7 +292,10 @@ class AlarmService : Service() {
             ).apply {
                 description = "알람 작동 시 벨소리를 원활하게 재생하기 위한 포그라운드 채널"
                 enableVibration(true)
-                setSound(null, null) // Audio is handled independently by MediaPlayer
+                vibrationPattern = longArrayOf(0, 1000, 1000, 1000)
+                setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(null, null) // Audio is handled independently by MediaPlayer to avoid duplicate overlay sound
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
@@ -245,6 +305,7 @@ class AlarmService : Service() {
     private fun buildNotification(alarmId: Int, label: String, timeStr: String, customToneUriStr: String?): Notification {
         val dismissIntent = Intent(this, AlarmService::class.java).apply {
             action = ACTION_DISMISS
+            putExtra("ALARM_ID", alarmId)
         }
         val dismissPendingIntent = PendingIntent.getService(
             this,
@@ -278,15 +339,28 @@ class AlarmService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val isLocked = keyguardManager.isKeyguardLocked
+        val isInteractive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+            powerManager.isInteractive
+        } else {
+            @Suppress("DEPRECATION")
+            powerManager.isScreenOn
+        }
+        val shouldShowFullScreen = isLocked || !isInteractive
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("알람이 울리는 중: $timeStr")
             .setContentText(label)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setFullScreenIntent(contentPendingIntent, true)
             .setContentIntent(contentPendingIntent)
             .setOngoing(true)
+            .setVibrate(longArrayOf(0, 1000, 1000, 1000))
+            .setSound(null)
+            .setDefaults(0)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
                 android.R.drawable.ic_lock_idle_alarm,
@@ -298,57 +372,29 @@ class AlarmService : Service() {
                 "알람 해제 (Dismiss)",
                 dismissPendingIntent
             )
-            .build()
-    }
+            .setFullScreenIntent(contentPendingIntent, true)
 
-    private fun setupMediaSession() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            try {
-                mediaSession = MediaSession(this, "CosmicAlarmMediaSession").apply {
-                    setCallback(object : MediaSession.Callback() {
-                        override fun onPause() {
-                            super.onPause()
-                            triggerSnooze()
-                        }
+        // Add Wear OS / Galaxy Watch extensions to show standalone notification and actions
+        val wearableExtender = NotificationCompat.WearableExtender()
+            .setHintContentIntentLaunchesActivity(true)
+            .addAction(
+                NotificationCompat.Action.Builder(
+                    android.R.drawable.ic_lock_idle_alarm,
+                    "5분 다시 울림",
+                    snoozePendingIntent
+                ).build()
+            )
+            .addAction(
+                NotificationCompat.Action.Builder(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    "알람 해제",
+                    dismissPendingIntent
+                ).build()
+            )
+        
+        builder.extend(wearableExtender)
 
-                        override fun onStop() {
-                            super.onStop()
-                            triggerSnooze()
-                        }
-
-                        override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
-                            val keyEvent = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                            if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
-                                val keyCode = keyEvent.keyCode
-                                // Exclude Galaxy Watch bezel rotation and volume keys
-                                if (keyCode == 260 || keyCode == 261 || // KEYCODE_NAVIGATE_PREVIOUS / KEYCODE_NAVIGATE_NEXT
-                                    keyCode == 262 || keyCode == 263 || // KEYCODE_NAVIGATE_IN / KEYCODE_NAVIGATE_OUT
-                                    keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
-                                    keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-                                    keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
-                                    return false
-                                }
-                                triggerSnooze()
-                                return true
-                            }
-                            return super.onMediaButtonEvent(mediaButtonIntent)
-                        }
-                    })
-                    val state = PlaybackState.Builder()
-                        .setActions(
-                            PlaybackState.ACTION_PLAY or
-                            PlaybackState.ACTION_PAUSE or
-                            PlaybackState.ACTION_STOP
-                        )
-                        .setState(PlaybackState.STATE_PLAYING, 0, 1.0f)
-                        .build()
-                    setPlaybackState(state)
-                    isActive = true
-                }
-            } catch (e: Exception) {
-                Log.e("AlarmService", "Failed to setup MediaSession", e)
-            }
-        }
+        return builder.build()
     }
 
     private fun triggerSnooze() {
@@ -416,16 +462,6 @@ class AlarmService : Service() {
     private fun stopAlarm() {
         stopAudio()
         stopVibrator()
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                mediaSession?.isActive = false
-                mediaSession?.release()
-            }
-        } catch (e: Exception) {
-            Log.e("AlarmService", "MediaSession release failed", e)
-        } finally {
-            mediaSession = null
-        }
     }
 
     private fun stopAudio() {

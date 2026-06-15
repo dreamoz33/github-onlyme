@@ -133,13 +133,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         if (viewModel.activeRingingAlarm.value != null) {
-            // Volume keys, Back key, and other physical key downs during ringing trigger a 5-minute snooze
-            viewModel.snoozeRinging(5)
-            val dismissOverlayIntent = android.content.Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
-                setPackage(packageName)
+            // Bezel rotation keys (rotate bezel on Wear OS / Galaxy Watch) map to 260-263.
+            // Ignore bezel rotation events so they have no effect on alarm ringing function.
+            val isBezelEvent = keyCode == 260 || keyCode == 261 || keyCode == 262 || keyCode == 263
+            if (!isBezelEvent) {
+                // Volume keys, Back key, and other physical key downs during ringing trigger a 5-minute snooze
+                viewModel.snoozeRinging(5)
+                val dismissOverlayIntent = android.content.Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
+                    setPackage(packageName)
+                }
+                sendBroadcast(dismissOverlayIntent)
+                return true
             }
-            sendBroadcast(dismissOverlayIntent)
-            return true
         }
         return super.onKeyDown(keyCode, event)
     }
@@ -416,7 +421,7 @@ fun BedsideHeader(
     var currentDateStr by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
-        val sdfTime = SimpleDateFormat("HH:mm:ss", Locale.KOREAN)
+        val sdfTime = SimpleDateFormat("a h:mm:ss", Locale.KOREAN)
         val sdfDate = SimpleDateFormat("YYYY년 M월 d일 (E)", Locale.KOREAN)
         while (true) {
             val now = Date()
@@ -3143,18 +3148,27 @@ fun AlarmEditDialog(
 ) {
     val context = LocalContext.current
 
-    var selectedHour by remember { mutableIntStateOf(alarm.hour) }
+    var isPm by remember { mutableStateOf(alarm.hour >= 12) }
+    var selected12Hour by remember {
+        mutableIntStateOf(
+            when {
+                alarm.hour == 0 -> 12
+                alarm.hour > 12 -> alarm.hour - 12
+                else -> alarm.hour
+            }
+        )
+    }
     var selectedMinute by remember { mutableIntStateOf(alarm.minute) }
     
     // Default to drag/scroll mode (isEditingHour = false, isEditingMinute = false)
     var isEditingHour by remember { mutableStateOf(false) }
     var isEditingMinute by remember { mutableStateOf(false) }
-    var hourInputText by remember { mutableStateOf(String.format(Locale.KOREAN, "%02d", alarm.hour)) }
+    var hourInputText by remember { mutableStateOf(String.format(Locale.KOREAN, "%02d", selected12Hour)) }
     var minuteInputText by remember { mutableStateOf(String.format(Locale.KOREAN, "%02d", alarm.minute)) }
 
-    androidx.compose.runtime.LaunchedEffect(selectedHour) {
+    androidx.compose.runtime.LaunchedEffect(selected12Hour) {
         if (!isEditingHour) {
-            hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
+            hourInputText = String.format(Locale.KOREAN, "%02d", selected12Hour)
         }
     }
     androidx.compose.runtime.LaunchedEffect(selectedMinute) {
@@ -3261,7 +3275,7 @@ fun AlarmEditDialog(
                 Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Time picker row (Elegant Custom Hours/Minutes Tuner - Scroll Wheel Mode)
+                // Time picker row (Elegant Custom Hours/Minutes Tuner - Scroll Wheel Mode with AM/PM toggle)
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -3271,16 +3285,64 @@ fun AlarmEditDialog(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Hour Wheel Picker
+                        // AM/PM Selector
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(end = 12.dp)
+                        ) {
+                            Text("구분", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (!isPm) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { isPm = false }
+                                        .padding(vertical = 8.dp)
+                                        .width(46.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "오전",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (!isPm) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (isPm) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { isPm = true }
+                                        .padding(vertical = 8.dp)
+                                        .width(46.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "오후",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (isPm) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        // Hour Wheel Picker (12-hour format)
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("시간", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                             Spacer(modifier = Modifier.height(4.dp))
                             
                             WheelPicker(
-                                selectedValue = selectedHour,
-                                range = (0..23).toList(),
-                                onValueChange = { selectedHour = it },
+                                selectedValue = selected12Hour,
+                                range = (1..12).toList(),
+                                onValueChange = { selected12Hour = it },
                                 modifier = Modifier.testTag("hour_wheel_picker"),
+                                itemWidth = 56.dp,
                                 buttonPosition = "LEFT",
                                 isEditing = isEditingHour,
                                 inputText = hourInputText,
@@ -3289,8 +3351,8 @@ fun AlarmEditDialog(
                                     hourInputText = filtered
                                     if (filtered.length == 2) {
                                         val parsed = filtered.toIntOrNull()
-                                        if (parsed != null && parsed in 0..23) {
-                                            selectedHour = parsed
+                                        if (parsed != null && parsed in 1..12) {
+                                            selected12Hour = parsed
                                             isEditingHour = false
                                         }
                                     }
@@ -3298,10 +3360,10 @@ fun AlarmEditDialog(
                                 focusRequester = hourFocusRequester,
                                 onDone = {
                                     val parsed = hourInputText.toIntOrNull()
-                                    if (parsed != null && parsed in 0..23) {
-                                        selectedHour = parsed
+                                    if (parsed != null && parsed in 1..12) {
+                                        selected12Hour = parsed
                                     }
-                                    hourInputText = String.format(Locale.KOREAN, "%02d", selectedHour)
+                                    hourInputText = String.format(Locale.KOREAN, "%02d", selected12Hour)
                                     isEditingHour = false
                                 },
                                 onCenterClick = {
@@ -3329,6 +3391,7 @@ fun AlarmEditDialog(
                                 range = (0..59).toList(),
                                 onValueChange = { selectedMinute = it },
                                 modifier = Modifier.testTag("minute_wheel_picker"),
+                                itemWidth = 56.dp,
                                 buttonPosition = "RIGHT",
                                 isEditing = isEditingMinute,
                                 inputText = minuteInputText,
@@ -3958,7 +4021,12 @@ fun AlarmEditDialog(
                     Button(
                         onClick = {
                             // Ensure any typed inputs in raw text are parsed and validated upon clicking save 
-                            val finalHour = hourInputText.toIntOrNull()?.coerceIn(0, 23) ?: selectedHour
+                            val parsed12Hour = hourInputText.toIntOrNull()?.coerceIn(1, 12) ?: selected12Hour
+                            val finalHour = if (parsed12Hour == 12) {
+                                if (isPm) 12 else 0
+                            } else {
+                                if (isPm) parsed12Hour + 12 else parsed12Hour
+                            }
                             val finalMinute = minuteInputText.toIntOrNull()?.coerceIn(0, 59) ?: selectedMinute
                             onSave(
                                 finalHour,
@@ -4532,9 +4600,30 @@ fun WheelPicker(
     // Capture user drag scroll end to snap and select nearest item
     androidx.compose.runtime.LaunchedEffect(lazyListState.isScrollInProgress) {
         if (!lazyListState.isScrollInProgress) {
-            val centerIdx = lazyListState.firstVisibleItemIndex
-            if (centerIdx in range.indices) {
-                onValueChange(range[centerIdx])
+            val layoutInfo = lazyListState.layoutInfo
+            val visibleItems = layoutInfo.visibleItemsInfo
+            if (visibleItems.isNotEmpty()) {
+                val viewportCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2
+                val closestItem = visibleItems.minByOrNull { item ->
+                    val itemCenter = item.offset + item.size / 2
+                    kotlin.math.abs(itemCenter - viewportCenter)
+                }
+                if (closestItem != null && closestItem.index in range.indices) {
+                    val targetIdx = closestItem.index
+                    if (lazyListState.firstVisibleItemIndex != targetIdx || kotlin.math.abs(lazyListState.firstVisibleItemScrollOffset) > 2) {
+                        try {
+                            lazyListState.animateScrollToItem(targetIdx)
+                        } catch (e: Exception) {
+                            // Suppress potential animation cancellations
+                        }
+                    }
+                    onValueChange(range[targetIdx])
+                }
+            } else {
+                val centerIdx = lazyListState.firstVisibleItemIndex
+                if (centerIdx in range.indices) {
+                    onValueChange(range[centerIdx])
+                }
             }
         }
     }
@@ -4546,42 +4635,57 @@ fun WheelPicker(
             modifier = Modifier.height(140.dp) // customized height for tight alignment
         ) {
             // Plus Button
-            androidx.compose.material3.IconButton(
-                onClick = {
-                    val currentIdx = range.indexOf(selectedValue)
-                    if (currentIdx < range.size - 1) {
-                        onValueChange(range[currentIdx + 1])
-                    } else {
-                        onValueChange(range.first()) // Wrap around
-                    }
-                },
+            Box(
                 modifier = Modifier
                     .size(36.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.50f), RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                    .clickable {
+                        val currentIdx = range.indexOf(selectedValue)
+                        if (currentIdx < range.size - 1) {
+                            onValueChange(range[currentIdx + 1])
+                        } else {
+                            onValueChange(range.first()) // Wrap around
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "증가",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
+                Box(
+                    modifier = Modifier.size(18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(12.dp)
+                            .height(2.5.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(2.5.dp)
+                            .height(12.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
 
             // Minus Button
-            androidx.compose.material3.IconButton(
-                onClick = {
-                    val currentIdx = range.indexOf(selectedValue)
-                    if (currentIdx > 0) {
-                        onValueChange(range[currentIdx - 1])
-                    } else {
-                        onValueChange(range.last()) // Wrap around
-                    }
-                },
+            Box(
                 modifier = Modifier
                     .size(36.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.50f), RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                    .clickable {
+                        val currentIdx = range.indexOf(selectedValue)
+                        if (currentIdx > 0) {
+                            onValueChange(range[currentIdx - 1])
+                        } else {
+                            onValueChange(range.last()) // Wrap around
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
                 Box(
                     modifier = Modifier.size(18.dp),
@@ -4615,8 +4719,11 @@ fun WheelPicker(
                     .clickable(enabled = onCenterClick != null && !isEditing) { onCenterClick?.invoke() }
             )
 
+            val snapFlingBehavior = androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior(lazyListState = lazyListState)
+
             androidx.compose.foundation.lazy.LazyColumn(
                 state = lazyListState,
+                flingBehavior = snapFlingBehavior,
                 contentPadding = PaddingValues(vertical = 43.dp), // exact mathematically computed alignment padding
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxSize(),
@@ -4702,21 +4809,23 @@ fun WheelPicker(
         ) {
             if (buttonPosition == "LEFT") {
                 sideButtonsColumn()
-                Spacer(modifier = Modifier.width(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
             } else if (buttonPosition == "LEFT_RIGHT") {
                 // Minus on Left
-                androidx.compose.material3.IconButton(
-                    onClick = {
-                        val currentIdx = range.indexOf(selectedValue)
-                        if (currentIdx > 0) {
-                            onValueChange(range[currentIdx - 1])
-                        } else {
-                            onValueChange(range.last())
-                        }
-                    },
+                Box(
                     modifier = Modifier
                         .size(36.dp)
-                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.50f), RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                        .clickable {
+                            val currentIdx = range.indexOf(selectedValue)
+                            if (currentIdx > 0) {
+                                onValueChange(range[currentIdx - 1])
+                            } else {
+                                onValueChange(range.last())
+                            }
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
                     Box(
                         modifier = Modifier.size(18.dp),
@@ -4730,36 +4839,49 @@ fun WheelPicker(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.width(16.dp)) // spread out slightly as requested!
+                Spacer(modifier = Modifier.width(8.dp)) // spread out slightly as requested!
             }
             
             centerWheelBox()
 
             if (buttonPosition == "RIGHT") {
-                Spacer(modifier = Modifier.width(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 sideButtonsColumn()
             } else if (buttonPosition == "LEFT_RIGHT") {
-                Spacer(modifier = Modifier.width(16.dp)) // spread out slightly as requested!
+                Spacer(modifier = Modifier.width(8.dp)) // spread out slightly as requested!
                 // Plus on Right
-                androidx.compose.material3.IconButton(
-                    onClick = {
-                        val currentIdx = range.indexOf(selectedValue)
-                        if (currentIdx < range.size - 1) {
-                            onValueChange(range[currentIdx + 1])
-                        } else {
-                            onValueChange(range.first())
-                        }
-                    },
+                Box(
                     modifier = Modifier
                         .size(36.dp)
-                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.50f), RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                        .clickable {
+                            val currentIdx = range.indexOf(selectedValue)
+                            if (currentIdx < range.size - 1) {
+                                onValueChange(range[currentIdx + 1])
+                            } else {
+                                onValueChange(range.first())
+                            }
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "증가",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    Box(
+                        modifier = Modifier.size(18.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(12.dp)
+                                .height(2.5.dp)
+                                .background(MaterialTheme.colorScheme.primary)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(2.5.dp)
+                                .height(12.dp)
+                                .background(MaterialTheme.colorScheme.primary)
+                        )
+                    }
                 }
             }
         }
@@ -4770,25 +4892,38 @@ fun WheelPicker(
             verticalArrangement = Arrangement.Center
         ) {
             // Plus Button (Up)
-            androidx.compose.material3.IconButton(
-                onClick = {
-                    val currentIdx = range.indexOf(selectedValue)
-                    if (currentIdx < range.size - 1) {
-                        onValueChange(range[currentIdx + 1])
-                    } else {
-                        onValueChange(range.first()) // Wrap around
-                    }
-                },
+            Box(
                 modifier = Modifier
                     .size(32.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.40f), RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                    .clickable {
+                        val currentIdx = range.indexOf(selectedValue)
+                        if (currentIdx < range.size - 1) {
+                            onValueChange(range[currentIdx + 1])
+                        } else {
+                            onValueChange(range.first()) // Wrap around
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "증가",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
-                )
+                Box(
+                    modifier = Modifier.size(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(11.dp)
+                            .height(2.0.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(2.0.dp)
+                            .height(11.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -4798,18 +4933,20 @@ fun WheelPicker(
             Spacer(modifier = Modifier.height(6.dp))
 
             // Minus Button (Down)
-            androidx.compose.material3.IconButton(
-                onClick = {
-                    val currentIdx = range.indexOf(selectedValue)
-                    if (currentIdx > 0) {
-                        onValueChange(range[currentIdx - 1])
-                    } else {
-                        onValueChange(range.last()) // Wrap around
-                    }
-                },
+            Box(
                 modifier = Modifier
                     .size(32.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.40f), RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                    .clickable {
+                        val currentIdx = range.indexOf(selectedValue)
+                        if (currentIdx > 0) {
+                            onValueChange(range[currentIdx - 1])
+                        } else {
+                            onValueChange(range.last()) // Wrap around
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
                 Box(
                     modifier = Modifier.size(16.dp),
@@ -4818,7 +4955,7 @@ fun WheelPicker(
                     Box(
                         modifier = Modifier
                             .width(11.dp)
-                            .height(2.dp)
+                            .height(2.0.dp)
                             .background(MaterialTheme.colorScheme.primary)
                     )
                 }
@@ -4831,18 +4968,20 @@ fun WheelPicker(
             horizontalArrangement = Arrangement.Center
         ) {
             // Minus Button for step-down adjustment
-            androidx.compose.material3.IconButton(
-                onClick = {
-                    val currentIdx = range.indexOf(selectedValue)
-                    if (currentIdx > 0) {
-                        onValueChange(range[currentIdx - 1])
-                    } else {
-                        onValueChange(range.last()) // Wrap around
-                    }
-                },
+            Box(
                 modifier = Modifier
                     .size(32.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.40f), RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                    .clickable {
+                        val currentIdx = range.indexOf(selectedValue)
+                        if (currentIdx > 0) {
+                            onValueChange(range[currentIdx - 1])
+                        } else {
+                            onValueChange(range.last()) // Wrap around
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
                 Box(
                     modifier = Modifier.size(16.dp),
@@ -4851,7 +4990,7 @@ fun WheelPicker(
                     Box(
                         modifier = Modifier
                             .width(11.dp)
-                            .height(2.dp)
+                            .height(2.0.dp)
                             .background(MaterialTheme.colorScheme.primary)
                     )
                 }
@@ -4864,25 +5003,38 @@ fun WheelPicker(
             Spacer(modifier = Modifier.width(6.dp))
 
             // Plus Button for step-up adjustment
-            androidx.compose.material3.IconButton(
-                onClick = {
-                    val currentIdx = range.indexOf(selectedValue)
-                    if (currentIdx < range.size - 1) {
-                        onValueChange(range[currentIdx + 1])
-                    } else {
-                        onValueChange(range.first()) // Wrap around
-                    }
-                },
+            Box(
                 modifier = Modifier
                     .size(32.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.40f), RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
+                    .clickable {
+                        val currentIdx = range.indexOf(selectedValue)
+                        if (currentIdx < range.size - 1) {
+                            onValueChange(range[currentIdx + 1])
+                        } else {
+                            onValueChange(range.first()) // Wrap around
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "증가",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
-                )
+                Box(
+                    modifier = Modifier.size(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(11.dp)
+                            .height(2.0.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(2.0.dp)
+                            .height(11.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
         }
     }

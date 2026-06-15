@@ -34,26 +34,19 @@ class AlarmAlertActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        // Show on lockscreen, turn screen on, keep screen awake
+        // Show on lockscreen, turn screen on, keep screen awake BEFORE super.onCreate
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
-            try {
-                val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
-                km.requestDismissKeyguard(this, null)
-            } catch (e: Exception) {
-                // Ignore keyguard request errors if secure lock is on
-            }
         }
         @Suppress("DEPRECATION")
         window.addFlags(
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
             WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         )
+
+        super.onCreate(savedInstanceState)
 
         // Extract Intent parameters
         val alarmId = intent.getIntExtra("ALARM_ID", -1)
@@ -123,6 +116,21 @@ class AlarmAlertActivity : ComponentActivity() {
         }
     }
 
+
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val alarmId = intent.getIntExtra("ALARM_ID", -1)
+        val label = intent.getStringExtra("ALARM_LABEL") ?: "알람"
+        val time = intent.getStringExtra("ALARM_TIME") ?: "--:--"
+        val toneUri = intent.getStringExtra("CUSTOM_TONE_URI")
+
+        if (alarmId != -1) {
+            viewModel.triggerRinging(alarmId, label, time, toneUri)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         try {
@@ -134,13 +142,18 @@ class AlarmAlertActivity : ComponentActivity() {
 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         if (viewModel.activeRingingAlarm.value != null) {
-            viewModel.snoozeRinging(5)
-            val dismissOverlayIntent = Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
-                setPackage(packageName)
+            // Bezel rotation keys (rotate bezel on Wear OS / Galaxy Watch) map to 260-263.
+            // Ignore bezel rotation events so they have no effect on alarm ringing function.
+            val isBezelEvent = keyCode == 260 || keyCode == 261 || keyCode == 262 || keyCode == 263
+            if (!isBezelEvent) {
+                viewModel.snoozeRinging(5)
+                val dismissOverlayIntent = Intent("com.example.ACTION_DISMISS_ALARM_RINGING").apply {
+                    setPackage(packageName)
+                }
+                sendBroadcast(dismissOverlayIntent)
+                finish()
+                return true
             }
-            sendBroadcast(dismissOverlayIntent)
-            finish()
-            return true
         }
         return super.onKeyDown(keyCode, event)
     }
